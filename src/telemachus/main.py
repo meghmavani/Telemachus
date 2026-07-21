@@ -73,22 +73,7 @@ def start(
 
     # Override log level if verbose
     if verbose:
-        config = config.__class__(
-            identity=config.identity,
-            paths=config.paths,
-            database=config.database,
-            logging=config.logging.__class__(
-                level="DEBUG",
-                format=config.logging.format,
-                max_bytes=config.logging.max_bytes,
-                backup_count=config.logging.backup_count,
-            ),
-            bootstrap=config.bootstrap,
-            pipeline=config.pipeline,
-            governance=config.governance,
-            communication=config.communication,
-            memory=config.memory,
-        )
+        config = config.with_log_level("DEBUG")
 
     # Initialize logging
     log = setup_logging(config)

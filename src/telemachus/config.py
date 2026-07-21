@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 DEFAULT_CONFIG_PATHS: list[str] = [
@@ -119,6 +119,23 @@ class TelemachusConfig:
     governance: GovernanceConfig = field(default_factory=GovernanceConfig)
     communication: CommunicationConfig = field(default_factory=CommunicationConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+
+    def with_log_level(self, level: str) -> TelemachusConfig:
+        """Return a new config with the logging level overridden.
+
+        Uses dataclasses.replace to create a new frozen instance with only
+        the logging section modified. All other sections are preserved.
+
+        Args:
+            level: The new log level (e.g. "DEBUG", "INFO", "WARNING").
+
+        Returns:
+            A new TelemachusConfig with the specified log level.
+        """
+        return replace(
+            self,
+            logging=replace(self.logging, level=level),
+        )
 
 
 def _find_section(

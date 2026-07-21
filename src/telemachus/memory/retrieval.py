@@ -9,10 +9,13 @@ Source: Codex/operations/MEMORY_ARCHITECTURE.md — Retrieval Strategy
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from telemachus.core.domains import get_domain_priority
 from telemachus.core.types import MemoryDomain
+
+if TYPE_CHECKING:
+    from telemachus.memory.store import MemoryStore
 
 
 class MemoryRetrieval:
@@ -25,7 +28,7 @@ class MemoryRetrieval:
         store: The MemoryStore instance to retrieve from.
     """
 
-    def __init__(self, store: MemoryStore) -> None:  # noqa: F821
+    def __init__(self, store: MemoryStore) -> None:
         """Initialize the retrieval engine.
 
         Args:

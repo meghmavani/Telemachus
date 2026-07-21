@@ -12,9 +12,12 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from telemachus.core.types import MemoryDomain
+
+if TYPE_CHECKING:
+    from telemachus.memory.store import MemoryStore
 
 
 @dataclass(frozen=True)
@@ -69,7 +72,7 @@ class VersionManager:
         store: The MemoryStore instance this manager operates on.
     """
 
-    def __init__(self, store: MemoryStore) -> None:  # noqa: F821
+    def __init__(self, store: MemoryStore) -> None:
         """Initialize the version manager.
 
         Args:

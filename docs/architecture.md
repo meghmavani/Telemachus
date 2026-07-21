@@ -48,8 +48,7 @@ src/telemachus/
 │   └── evolution.py         # Identity-preserving evolution
 ├── interaction/
 │   ├── __init__.py
-│   ├── communication.py     # Adaptive communication modes
-│   ├── emotional.py         # Emotional state model
+│   ├── communication.py     # Adaptive communication modes (includes emotional model)
 │   └── cli_chat.py          # Interactive CLI chat
 └── tools/
     ├── __init__.py

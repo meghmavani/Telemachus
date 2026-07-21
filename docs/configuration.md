@@ -8,7 +8,8 @@ Telemachus searches for configuration in these locations (in order):
 
 1. Path specified via `--config` CLI flag
 2. `./telemachus.toml` (current directory)
-3. `~/.telemachus/telemachus.toml` (user home)
+3. `~/.config/telemachus/telemachus.toml` (XDG user config)
+4. `/etc/telemachus/telemachus.toml` (system-wide)
 
 The first file found is used. All values have sensible defaults.
 

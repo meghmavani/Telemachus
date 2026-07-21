@@ -1,14 +1,13 @@
-services:
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: qdrant
-    restart: unless-stopped
+# docker-compose.yml — Telemachus Development Services
+#
+# Currently, Telemachus uses SQLite for all persistence (no external
+# services required). This file is reserved for future optional services
+# such as vector databases or monitoring infrastructure.
+#
+# To add a service, uncomment and configure below:
 
-    ports:
-      - "6333:6333"
-
-    volumes:
-      - qdrant_storage:/qdrant/storage
-
-volumes:
-  qdrant_storage:
+# services:
+#   example:
+#     image: example:latest
+#     ports:
+#       - "8080:8080"

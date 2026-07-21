@@ -246,15 +246,18 @@ class MemoryStore:
     def get_stats(self) -> dict[str, Any]
 ```
 
-### `telemachus.memory.index` — Semantic Index
+### `telemachus.memory.index` — Memory Index
 
-**`SemanticIndex`** — Cross-domain keyword-based search index.
+**`MemoryIndex`** — Cross-domain keyword-based search index.
 ```python
-class SemanticIndex:
+class MemoryIndex:
     def __init__(self, store: MemoryStore) -> None
-    def index(self, memory_id: str, content: str, domain: MemoryDomain) -> None
-    def search(self, query: str, domain: MemoryDomain | None = None, limit: int = 50) -> list[str]
-    def remove(self, memory_id: str) -> None
+    def index_entry(self, entry_id: str, domain: str, keys: list[str]) -> None
+    def remove_entry(self, entry_id: str) -> int
+    def find_by_key(self, key: str, domain: str | None = None) -> list[dict[str, Any]]
+    def find_related(self, entry_id: str, domain: str) -> list[dict[str, Any]]
+    def get_all_keys(self) -> list[str]
+    def get_domain_index_stats(self, domain: str) -> dict[str, Any]
 ```
 
 ### `telemachus.memory.versioning` — Memory Versioning
@@ -271,19 +274,18 @@ class VersionManager:
 
 ### `telemachus.memory.retrieval` — Memory Retrieval
 
-**`MemoryRetriever`** — Context-aware memory retrieval.
+**`MemoryRetrieval`** — Context-aware memory retrieval.
 ```python
-class MemoryRetriever:
-    def __init__(self, store: MemoryStore, index: SemanticIndex) -> None
-    def retrieve(
-        self,
-        query: str,
-        domain: MemoryDomain | None = None,
-        limit: int = 10,
-        context: dict | None = None,
-    ) -> list[dict]
-    def retrieve_by_recency(self, domain: MemoryDomain | None = None, limit: int = 10) -> list[dict]
-    def retrieve_by_importance(self, domain: MemoryDomain | None = None, limit: int = 10) -> list[dict]
+class MemoryRetrieval:
+    def __init__(self, store: MemoryStore, index: MemoryIndex) -> None
+    def retrieve_by_domain(self, domain: MemoryDomain, limit: int = 50) -> list[dict[str, Any]]
+    def retrieve_important(self, domain: MemoryDomain, threshold: float = 0.7, limit: int = 50) -> list[dict[str, Any]]
+    def retrieve_recent(self, domain: MemoryDomain, limit: int = 50) -> list[dict[str, Any]]
+    def retrieve_cross_domain(self, domains: list[MemoryDomain] | None = None, limit: int = 50) -> list[dict[str, Any]]
+    def retrieve_by_context(self, context_keys: list[str], limit: int = 50) -> list[dict[str, Any]]
+    def retrieve_by_importance_range(self, domain: MemoryDomain, min_importance: float = 0.0, max_importance: float = 1.0, limit: int = 50) -> list[dict[str, Any]]
+    def count_active(self, domain: MemoryDomain | None = None) -> int
+    def count_all(self, domain: MemoryDomain | None = None) -> int
 ```
 
 ---
@@ -334,10 +336,10 @@ Sacred constraints (can never be violated):
 
 ### `telemachus.governance.autonomy` — Autonomy Charter
 
-**`AutonomyManager`** — 5-level permission system with domain-specific trust.
+**`AutonomyCharter`** — 5-level permission system with domain-specific trust.
 ```python
-class AutonomyManager:
-    def __init__(self) -> None
+class AutonomyCharter:
+    def __init__(self, default_level: AutonomyLevel = AutonomyLevel.OBSERVATION) -> None
     def check_permission(
         self,
         action: str,
@@ -581,25 +583,28 @@ class EvolutionProposal:
 
 ### `telemachus.interaction.communication` — Communication Charter
 
-**`CommunicationManager`** — Adaptive communication mode selection and response formatting.
+**`CommunicationEngine`** — Adaptive communication mode selection and response formatting.
 ```python
-class CommunicationManager:
+class CommunicationEngine:
     def __init__(self, default_mode: CommunicationMode = CommunicationMode.COLLABORATIVE) -> None
-    def determine_mode(self, user_input: str, context: dict | None = None) -> CommunicationMode
+    def select_mode(self, user_input: str, risk_level: RiskLevel | None = None, context: dict | None = None) -> CommunicationMode
+    def detect_emotional_state(self, user_input: str) -> EmotionalState
+    def select_explanation_depth(self, user_input: str, risk_level: RiskLevel | None = None, context: dict | None = None) -> ExplanationDepth
     def format_response(
         self,
         content: str,
         mode: CommunicationMode | None = None,
-        context: dict | None = None,
+        context: CommunicationContext | None = None,
     ) -> str
+    def build_context(self, user_input: str, pipeline_result: PipelineResult | None = None, mode: CommunicationMode | None = None) -> CommunicationContext
 ```
 
 ### `telemachus.interaction.cli_chat` — CLI Chat
 
-**`CLIChat`** — Interactive CLI chat loop.
+**`ChatSession`** — Interactive CLI chat loop.
 ```python
-class CLIChat:
-    def __init__(self, pipeline: CognitivePipeline) -> None
+class ChatSession:
+    def __init__(self, pipeline: CognitivePipeline, config: TelemachusConfig) -> None
     def run(self) -> None
 ```
 
@@ -645,7 +650,7 @@ class ToolResult:
     def fail(cls, error: str) -> ToolResult
 ```
 
-**`ToolCategory`** (enum): `PASSIVE`, `ACTIVE`, `AUTONOMOUS`, `SACRED`
+**`ToolCategory`** (enum): `PASSIVE`, `ACTIVE`, `COGNITIVE`, `AUTONOMOUS`
 
 ### `telemachus.tools.registry` — Tool Registry
 
@@ -690,9 +695,9 @@ class CognitivePipeline:
         self,
         risk_evaluator: RiskEvaluator | None = None,
         ethics_engine: EthicalBoundaryEngine | None = None,
-        autonomy_manager: AutonomyManager | None = None,
+        autonomy_charter: AutonomyCharter | None = None,
         decision_framework: DecisionFramework | None = None,
-        communication_manager: CommunicationManager | None = None,
+        communication_engine: CommunicationEngine | None = None,
         learning_engine: LearningEngine | None = None,
         reflection_engine: ReflectionEngine | None = None,
         evolution_engine: EvolutionEngine | None = None,
