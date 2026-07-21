@@ -10,7 +10,7 @@ A local-first autonomous AI companion — layered cognitive system with structur
 
 ```bash
 # Clone and install
-git clone <repo-url> telemachus
+git clone https://github.com/meghmavani/Telemachus telemachus
 cd telemachus
 pip install -e ".[dev]"
 
