@@ -1,0 +1,59 @@
+# Telemachus Configuration
+
+[identity]
+name = "Telemachus"
+creator = "Revan"
+version = "0.1.0"
+
+[paths]
+# Directory where Telemachus stores its persistent data
+data_dir = "./data"
+# Directory containing the Codex (core documents)
+codex_dir = "./codex"
+# Directory for logs
+log_dir = "./logs"
+
+[database]
+# SQLite database path (relative to data_dir)
+path = "telemachus.db"
+
+[logging]
+level = "INFO"
+# JSON structured logging
+format = "json"
+# Log file rotation: max bytes before rotation
+max_bytes = 10485760
+# Number of backup log files to keep
+backup_count = 5
+
+[bootstrap]
+# Phases to run during startup
+phases = ["load_core_docs", "evaluate_state", "load_memory", "reconnect", "resume"]
+# Whether to enter First Awakening mode on fresh install
+first_awakening = true
+
+[pipeline]
+# Maximum pipeline execution time in seconds
+timeout = 300
+# Whether to run reflection after every action
+reflect_on_action = true
+# Whether to run learning updates after every action
+learn_on_action = true
+
+[governance]
+# Default autonomy level for new domains
+default_autonomy_level = 1
+# Require explicit approval for risk level >= this
+approval_risk_threshold = 3
+
+[communication]
+# Default communication mode
+default_mode = "collaborative"
+# Enable emotional awareness
+emotional_awareness = true
+
+[memory]
+# Maximum entries per domain before archival
+max_entries_per_domain = 100000
+# Enable automatic indexing
+auto_index = true
