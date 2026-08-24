@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Telemachus runtime state
+data/
+logs/
+*.db
+*.db-wal
+*.db-shm
+llm_cooldowns.json
+llm_calls.jsonl
