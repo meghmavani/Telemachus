@@ -16,10 +16,11 @@ from rich.prompt import Prompt
 from rich.text import Text
 
 from telemachus.config import TelemachusConfig, load_config_from_path
-from telemachus.core.types import CommunicationMode, PipelineContext
+from telemachus.core.types import CommunicationMode
 from telemachus.interaction.communication import CommunicationEngine
 from telemachus.logging_config import get_logger, setup_logging
 from telemachus.pipeline import CognitivePipeline
+from telemachus.wiring import build_pipeline
 
 logger = get_logger("cli_chat")
 
@@ -208,23 +209,22 @@ class ChatSession:
         """
         self._message_count += 1
 
-        # Build pipeline context
-        ctx = PipelineContext(
-            user_input=user_input,
-            session_id=self._session_id or "cli-session",
-            communication_mode=self._explicit_mode or CommunicationMode.COLLABORATIVE,
-            metadata={
-                "message_number": self._message_count,
-                "source": "cli_chat",
-            },
-        )
-
         # Run through pipeline
         logger.debug(
             "Processing input through pipeline",
             extra={"extra": {"input_length": len(user_input)}},
         )
-        result = self._pipeline.process(ctx)
+        result = self._pipeline.process(
+            user_input,
+            communication_mode=(
+                self._explicit_mode or CommunicationMode.COLLABORATIVE
+            ),
+            context={
+                "message_number": self._message_count,
+                "source": "cli_chat",
+            },
+            session_id=self._session_id or "cli-session",
+        )
 
         # Format response through communication engine
         emotional_state = self._communication.detect_emotional_state(user_input)
@@ -368,8 +368,7 @@ def start_chat(
     config.paths.log_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize pipeline with memory store if configured
-    db_path = config.paths.data_dir / config.database.path
-    pipeline = CognitivePipeline(db_path=str(db_path))
+    pipeline = build_pipeline(config)
 
     # Create and run chat session
     session = ChatSession(config, pipeline=pipeline)

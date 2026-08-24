@@ -107,6 +107,49 @@ class MemoryConfig:
 
 
 @dataclass(frozen=True)
+class LLMCandidate:
+    """One model endpoint that can serve a role.
+
+    Attributes:
+        name: Stable identifier used in logs and cooldown state.
+        provider: Transport to use — "openai" (any OpenAI-compatible
+            endpoint) or "ollama".
+        base_url: Endpoint root, without the path.
+        model: Model identifier as the provider names it.
+        api_key_env: Environment variable holding the key, if one is needed.
+            The key itself is never read from the config file.
+        max_tokens: Default token budget for this candidate.
+        temperature: Default sampling temperature for this candidate.
+        extra_body: Provider-specific request fields merged into the payload.
+    """
+
+    name: str
+    provider: str
+    base_url: str
+    model: str
+    api_key_env: str = ""
+    max_tokens: int = 512
+    temperature: float = 0.2
+    extra_body: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class LLMConfig:
+    """Model access settings.
+
+    Attributes:
+        enabled: Master switch. When False Telemachus runs deterministically.
+        timeout_sec: Per-request socket timeout.
+        candidates: Role name to ordered candidate list. Roles express
+            escalation — cheap models triage, expensive models decide.
+    """
+
+    enabled: bool = False
+    timeout_sec: float = 45.0
+    candidates: dict[str, list[LLMCandidate]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class TelemachusConfig:
     """Root configuration for the Telemachus system."""
 
@@ -119,6 +162,7 @@ class TelemachusConfig:
     governance: GovernanceConfig = field(default_factory=GovernanceConfig)
     communication: CommunicationConfig = field(default_factory=CommunicationConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
 
     def with_log_level(self, level: str) -> TelemachusConfig:
         """Return a new config with the logging level overridden.
@@ -150,6 +194,127 @@ def _find_section(
             f"Configuration section '[{key}]' must be a table, got {type(section).__name__}"
         )
     return section
+
+
+def _as_str(section: dict[str, object], key: str, default: str, *, table: str) -> str:
+    """Read a string setting, reporting the offending key if it is the wrong type."""
+    value = section.get(key, default)
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"[{table}] {key} must be a string, got {type(value).__name__}: {value!r}"
+        )
+    return value
+
+
+def _as_int(section: dict[str, object], key: str, default: int, *, table: str) -> int:
+    """Read an integer setting.
+
+    Booleans are rejected explicitly: ``bool`` is a subclass of ``int`` in
+    Python, so ``max_bytes = true`` would otherwise silently become 1.
+    """
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(
+            f"[{table}] {key} must be an integer, got {type(value).__name__}: {value!r}"
+        )
+    return value
+
+
+def _as_float(section: dict[str, object], key: str, default: float, *, table: str) -> float:
+    """Read a float setting. Integers are accepted and widened."""
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(
+            f"[{table}] {key} must be a number, got {type(value).__name__}: {value!r}"
+        )
+    return float(value)
+
+
+def _as_bool(section: dict[str, object], key: str, default: bool, *, table: str) -> bool:
+    """Read a boolean setting, reporting the offending key if it is the wrong type."""
+    value = section.get(key, default)
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f"[{table}] {key} must be a boolean, got {type(value).__name__}: {value!r}"
+        )
+    return value
+
+
+def _as_str_list(
+    section: dict[str, object], key: str, default: list[str], *, table: str
+) -> list[str]:
+    """Read a list-of-strings setting, reporting the offending key on mismatch."""
+    value = section.get(key, default)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ConfigError(
+            f"[{table}] {key} must be a list of strings, got {value!r}"
+        )
+    return list(value)
+
+
+def _parse_llm(section: dict[str, object]) -> LLMConfig:
+    """Build the LLM configuration from its raw TOML table.
+
+    Candidates are declared per role as arrays of tables::
+
+        [[llm.candidates.converse]]
+        name = "local"
+        provider = "ollama"
+        base_url = "http://localhost:11434"
+        model = "qwen3:8b"
+
+    Args:
+        section: The raw ``[llm]`` table.
+
+    Returns:
+        A validated LLMConfig.
+
+    Raises:
+        ConfigError: If a candidate is malformed or names an unknown provider.
+    """
+    raw_candidates = section.get("candidates", {})
+    if not isinstance(raw_candidates, dict):
+        raise ConfigError("[llm] candidates must be a table of roles")
+
+    candidates: dict[str, list[LLMCandidate]] = {}
+    for role, entries in raw_candidates.items():
+        if not isinstance(entries, list):
+            raise ConfigError(f"[llm.candidates.{role}] must be an array of tables")
+        parsed: list[LLMCandidate] = []
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise ConfigError(f"[llm.candidates.{role}] entry {index} must be a table")
+            table = f"llm.candidates.{role}"
+            for required in ("name", "provider", "base_url", "model"):
+                if required not in entry:
+                    raise ConfigError(f"[{table}] entry {index} is missing '{required}'")
+            provider = _as_str(entry, "provider", "", table=table)
+            if provider not in ("openai", "ollama"):
+                raise ConfigError(
+                    f"[{table}] unknown provider {provider!r} — expected 'openai' or 'ollama'"
+                )
+            extra = entry.get("extra_body", {})
+            if not isinstance(extra, dict):
+                raise ConfigError(f"[{table}] extra_body must be a table")
+            parsed.append(
+                LLMCandidate(
+                    name=_as_str(entry, "name", "", table=table),
+                    provider=provider,
+                    base_url=_as_str(entry, "base_url", "", table=table),
+                    model=_as_str(entry, "model", "", table=table),
+                    api_key_env=_as_str(entry, "api_key_env", "", table=table),
+                    max_tokens=_as_int(entry, "max_tokens", 512, table=table),
+                    temperature=_as_float(entry, "temperature", 0.2, table=table),
+                    extra_body=dict(extra),
+                )
+            )
+        candidates[str(role)] = parsed
+
+    return LLMConfig(
+        enabled=_as_bool(section, "enabled", False, table="llm"),
+        timeout_sec=_as_float(section, "timeout_sec", 45.0, table="llm"),
+        candidates=candidates,
+    )
 
 
 def _resolve_paths(config: TelemachusConfig) -> TelemachusConfig:
@@ -243,53 +408,71 @@ def load_config_from_path(config_path: str | Path | None = None) -> TelemachusCo
     governance_raw = _find_section(data, "governance", {})
     communication_raw = _find_section(data, "communication", {})
     memory_raw = _find_section(data, "memory", {})
+    llm_raw = _find_section(data, "llm", {})
 
     config = TelemachusConfig(
         identity=IdentityConfig(
-            name=str(identity_raw.get("name", "Telemachus")),
-            creator=str(identity_raw.get("creator", "Revan")),
-            version=str(identity_raw.get("version", "0.1.0")),
+            name=_as_str(identity_raw, "name", "Telemachus", table="identity"),
+            creator=_as_str(identity_raw, "creator", "Revan", table="identity"),
+            version=_as_str(identity_raw, "version", "0.1.0", table="identity"),
         ),
         paths=PathsConfig(
-            data_dir=Path(str(paths_raw.get("data_dir", "./data"))),
-            codex_dir=Path(str(paths_raw.get("codex_dir", "./codex"))),
-            log_dir=Path(str(paths_raw.get("log_dir", "./logs"))),
+            data_dir=Path(_as_str(paths_raw, "data_dir", "./data", table="paths")),
+            codex_dir=Path(_as_str(paths_raw, "codex_dir", "./codex", table="paths")),
+            log_dir=Path(_as_str(paths_raw, "log_dir", "./logs", table="paths")),
         ),
         database=DatabaseConfig(
-            path=str(database_raw.get("path", "telemachus.db")),
+            path=_as_str(database_raw, "path", "telemachus.db", table="database"),
         ),
         logging=LoggingConfig(
-            level=str(logging_raw.get("level", "INFO")),
-            format=str(logging_raw.get("format", "json")),
-            max_bytes=int(logging_raw.get("max_bytes", 10_485_760)),
-            backup_count=int(logging_raw.get("backup_count", 5)),
+            level=_as_str(logging_raw, "level", "INFO", table="logging"),
+            format=_as_str(logging_raw, "format", "json", table="logging"),
+            max_bytes=_as_int(logging_raw, "max_bytes", 10_485_760, table="logging"),
+            backup_count=_as_int(logging_raw, "backup_count", 5, table="logging"),
         ),
         bootstrap=BootstrapConfig(
-            phases=list(
-                bootstrap_raw.get(
-                    "phases",
-                    ["load_core_docs", "evaluate_state", "load_memory", "reconnect", "resume"],
-                )
+            phases=_as_str_list(
+                bootstrap_raw,
+                "phases",
+                ["load_core_docs", "evaluate_state", "load_memory", "reconnect", "resume"],
+                table="bootstrap",
             ),
-            first_awakening=bool(bootstrap_raw.get("first_awakening", True)),
+            first_awakening=_as_bool(
+                bootstrap_raw, "first_awakening", True, table="bootstrap"
+            ),
         ),
         pipeline=PipelineConfig(
-            timeout=int(pipeline_raw.get("timeout", 300)),
-            reflect_on_action=bool(pipeline_raw.get("reflect_on_action", True)),
-            learn_on_action=bool(pipeline_raw.get("learn_on_action", True)),
+            timeout=_as_int(pipeline_raw, "timeout", 300, table="pipeline"),
+            reflect_on_action=_as_bool(
+                pipeline_raw, "reflect_on_action", True, table="pipeline"
+            ),
+            learn_on_action=_as_bool(
+                pipeline_raw, "learn_on_action", True, table="pipeline"
+            ),
         ),
         governance=GovernanceConfig(
-            default_autonomy_level=int(governance_raw.get("default_autonomy_level", 1)),
-            approval_risk_threshold=int(governance_raw.get("approval_risk_threshold", 3)),
+            default_autonomy_level=_as_int(
+                governance_raw, "default_autonomy_level", 1, table="governance"
+            ),
+            approval_risk_threshold=_as_int(
+                governance_raw, "approval_risk_threshold", 3, table="governance"
+            ),
         ),
         communication=CommunicationConfig(
-            default_mode=str(communication_raw.get("default_mode", "collaborative")),
-            emotional_awareness=bool(communication_raw.get("emotional_awareness", True)),
+            default_mode=_as_str(
+                communication_raw, "default_mode", "collaborative", table="communication"
+            ),
+            emotional_awareness=_as_bool(
+                communication_raw, "emotional_awareness", True, table="communication"
+            ),
         ),
         memory=MemoryConfig(
-            max_entries_per_domain=int(memory_raw.get("max_entries_per_domain", 100_000)),
-            auto_index=bool(memory_raw.get("auto_index", True)),
+            max_entries_per_domain=_as_int(
+                memory_raw, "max_entries_per_domain", 100_000, table="memory"
+            ),
+            auto_index=_as_bool(memory_raw, "auto_index", True, table="memory"),
         ),
+        llm=_parse_llm(llm_raw),
     )
 
     config = _resolve_paths(config)

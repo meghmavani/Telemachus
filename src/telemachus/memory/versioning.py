@@ -118,6 +118,8 @@ class VersionManager:
             ),
         )
         version_id = cursor.lastrowid
+        if version_id is None:  # pragma: no cover — sqlite always sets this on INSERT
+            raise RuntimeError("INSERT did not return a row id")
         self.store.conn.commit()
 
         return MemoryVersion(
@@ -243,7 +245,7 @@ class VersionManager:
         entry = self.store.retrieve(domain, entry_id)
         if entry is None:
             return 0
-        return entry["current_version"]
+        return int(entry["current_version"])
 
     def count_versions(self, domain: MemoryDomain, entry_id: int) -> int:
         """Count how many versions exist for an entry.

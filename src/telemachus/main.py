@@ -16,9 +16,10 @@ from rich.panel import Panel
 from rich.table import Table
 
 from telemachus import __version__
-from telemachus.bootstrap import BootstrapProtocol
-from telemachus.config import ConfigError, load_config_from_path
+from telemachus.bootstrap import BootstrapProtocol, BootstrapResult
+from telemachus.config import ConfigError, TelemachusConfig, load_config_from_path
 from telemachus.logging_config import get_logger, setup_logging
+from telemachus.wiring import build_memory_store
 
 app = typer.Typer(
     name="telemachus",
@@ -88,11 +89,8 @@ def start(
 
     # Run the 5-phase bootstrap protocol
     console.print("\n[bold]Bootstrapping...[/bold]")
-    bootstrap = BootstrapProtocol(
-        codex_dir=config.paths.codex_dir,
-        data_dir=config.paths.data_dir,
-        first_awakening=config.bootstrap.first_awakening,
-    )
+    memory_store = build_memory_store(config)
+    bootstrap = BootstrapProtocol(config=config, memory_store=memory_store)
     result = bootstrap.bootstrap()
 
     # Display bootstrap results
@@ -207,7 +205,7 @@ def chat(
     start_chat(config_path=config_path, verbose=verbose)
 
 
-def _display_startup_info(config) -> None:
+def _display_startup_info(config: TelemachusConfig) -> None:
     """Display startup information to the console."""
     console.print(f"  Data directory: [dim]{config.paths.data_dir}[/dim]")
     console.print(f"  Codex directory: [dim]{config.paths.codex_dir}[/dim]")
@@ -216,7 +214,7 @@ def _display_startup_info(config) -> None:
     console.print()
 
 
-def _display_bootstrap_result(result) -> None:
+def _display_bootstrap_result(result: BootstrapResult) -> None:
     """Display the bootstrap protocol results.
 
     Args:
@@ -252,7 +250,7 @@ def _display_bootstrap_result(result) -> None:
             console.print(f"  [red]•[/red] {error}")
 
 
-def _display_first_awakening(bootstrap) -> None:
+def _display_first_awakening(bootstrap: BootstrapProtocol) -> None:
     """Display the first awakening questions.
 
     Args:

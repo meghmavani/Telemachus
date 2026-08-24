@@ -124,14 +124,31 @@ class MemoryStore:
         )
         self.conn.commit()
 
+    def _require_conn(self) -> sqlite3.Connection:
+        """Return the live connection, or fail with a consistent message.
+
+        Args:
+            None.
+
+        Returns:
+            The open sqlite3 connection.
+
+        Raises:
+            RuntimeError: If the store is not connected.
+        """
+        if self.conn is None:
+            raise RuntimeError("MemoryStore not connected. Call connect() first.")
+        return self.conn
+
     def _create_domain_table(self, domain_def: DomainDefinition) -> None:
         """Create the memory_entries table for a single domain.
 
         Args:
             domain_def: The domain definition.
         """
+        conn = self._require_conn()
         domain_name = domain_def.domain.value
-        self.conn.execute(
+        conn.execute(
             f"""CREATE TABLE IF NOT EXISTS memory_entries_{domain_name} (
                 entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 content TEXT NOT NULL,
@@ -143,15 +160,15 @@ class MemoryStore:
                 current_version INTEGER NOT NULL DEFAULT 1
             )"""
         )
-        self.conn.execute(
+        conn.execute(
             f"""CREATE INDEX IF NOT EXISTS idx_entries_{domain_name}_active
                ON memory_entries_{domain_name}(is_active)"""
         )
-        self.conn.execute(
+        conn.execute(
             f"""CREATE INDEX IF NOT EXISTS idx_entries_{domain_name}_importance
                ON memory_entries_{domain_name}(importance)"""
         )
-        self.conn.execute(
+        conn.execute(
             f"""CREATE INDEX IF NOT EXISTS idx_entries_{domain_name}_created
                ON memory_entries_{domain_name}(created_at)"""
         )
@@ -192,6 +209,8 @@ class MemoryStore:
             (content, meta_json, importance, now, now),
         )
         entry_id = cursor.lastrowid
+        if entry_id is None:  # pragma: no cover — sqlite always sets this on INSERT
+            raise RuntimeError("INSERT did not return a row id")
 
         if index_keys:
             for key, value in index_keys.items():
@@ -477,6 +496,104 @@ class MemoryStore:
             }
             for row in rows
         ]
+
+    def search(
+        self,
+        query: str,
+        domain: MemoryDomain | None = None,
+        limit: int = 20,
+        *,
+        active_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Search entry content across one or all domains.
+
+        A substring match over ``content``, ordered by importance. This is
+        deliberately not a semantic search: the memory store is an
+        append-only record, and retrieval that cannot be explained is
+        retrieval that cannot be audited. Ranked retrieval belongs in the
+        retrieval layer above.
+
+        Args:
+            query: Substring to look for in entry content.
+            domain: Restrict to a single domain, or None to search all.
+            limit: Maximum number of results across all domains searched.
+            active_only: If True, exclude deactivated entries.
+
+        Returns:
+            A list of entry dictionaries, each carrying its source domain.
+
+        Raises:
+            RuntimeError: If not connected.
+        """
+        if self.conn is None:
+            raise RuntimeError("MemoryStore not connected. Call connect() first.")
+
+        domains = [domain] if domain is not None else list(MemoryDomain)
+        pattern = f"%{query}%"
+        results: list[dict[str, Any]] = []
+
+        for dom in domains:
+            sql = (
+                "SELECT entry_id, content, metadata, importance, is_active, "
+                f"created_at, updated_at, current_version FROM memory_entries_{dom.value} "
+                "WHERE content LIKE ?"
+            )
+            if active_only:
+                sql += " AND is_active = 1"
+            sql += " ORDER BY importance DESC, created_at DESC LIMIT ?"
+
+            for row in self.conn.execute(sql, (pattern, limit)).fetchall():
+                results.append(
+                    {
+                        "entry_id": row[0],
+                        "domain": dom.value,
+                        "content": row[1],
+                        "metadata": json.loads(row[2]),
+                        "importance": row[3],
+                        "is_active": bool(row[4]),
+                        "created_at": row[5],
+                        "updated_at": row[6],
+                        "current_version": row[7],
+                    }
+                )
+
+        results.sort(key=lambda r: (-r["importance"], -r["created_at"]))
+        return results[:limit]
+
+    def get_stats(self) -> dict[str, Any]:
+        """Summarize the contents of the store.
+
+        Used by the bootstrap protocol to verify that memory is operational
+        and to report what was recovered.
+
+        Returns:
+            A dictionary with per-domain active/total counts, the overall
+            totals, the schema version, and the database path.
+
+        Raises:
+            RuntimeError: If not connected.
+        """
+        if self.conn is None:
+            raise RuntimeError("MemoryStore not connected. Call connect() first.")
+
+        domains: dict[str, dict[str, int]] = {}
+        total_active = 0
+        total_entries = 0
+
+        for domain in MemoryDomain:
+            active = self.count(domain, active_only=True)
+            total = self.count(domain, active_only=False)
+            domains[domain.value] = {"active": active, "total": total}
+            total_active += active
+            total_entries += total
+
+        return {
+            "domains": domains,
+            "total_active": total_active,
+            "total_entries": total_entries,
+            "schema_version": self.SCHEMA_VERSION,
+            "db_path": str(self.db_path),
+        }
 
     def get_version_history(self, domain: MemoryDomain, entry_id: int) -> list[dict[str, Any]]:
         """Retrieve the full version history for an entry.

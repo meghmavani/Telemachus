@@ -333,7 +333,7 @@ class Project:
                 "completion_pct": 0.0,
             }
 
-        counts = {
+        counts: dict[str, float] = {
             "total_tasks": total,
             "completed": len(self.get_completed_tasks()),
             "in_progress": len(self.get_tasks_by_status(TaskState.IN_PROGRESS)),
