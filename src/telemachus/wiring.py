@@ -19,6 +19,8 @@ from telemachus.memory.store import MemoryStore
 from telemachus.pipeline import CognitivePipeline
 from telemachus.runtime.lifecycle import RuntimeLifecycle
 from telemachus.runtime.state_store import RuntimeStateStore
+from telemachus.tools.builtin import EchoTool
+from telemachus.tools.registry import ToolRegistry
 
 logger = logging.getLogger("telemachus.wiring")
 
@@ -43,20 +45,41 @@ def build_memory_store(config: TelemachusConfig) -> MemoryStore:
     return store
 
 
+def build_tool_registry() -> ToolRegistry:
+    """Build the tool registry with every built-in tool registered.
+
+    This is the only place production code constructs a ToolRegistry.
+    Currently registers ``EchoTool`` — the minimal tool proving the
+    Stage 6 execution boundary. Real tools land here as they are built;
+    nothing about Stage 6 needs to change to add one.
+
+    Returns:
+        A ToolRegistry with all built-in tools active.
+    """
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    return registry
+
+
 def build_pipeline(
-    config: TelemachusConfig, memory_store: MemoryStore | None = None
+    config: TelemachusConfig,
+    memory_store: MemoryStore | None = None,
+    tool_registry: ToolRegistry | None = None,
 ) -> CognitivePipeline:
     """Build a cognitive pipeline backed by the configured memory store.
 
     Args:
         config: The system configuration.
         memory_store: An already-connected store. Built from config if None.
+        tool_registry: The registry backing Stage 6 execution. Built with
+            the built-in tools if None.
 
     Returns:
         A CognitivePipeline ready to process input.
     """
     store = memory_store if memory_store is not None else build_memory_store(config)
-    return CognitivePipeline(memory_store=store)
+    registry = tool_registry if tool_registry is not None else build_tool_registry()
+    return CognitivePipeline(memory_store=store, tool_registry=registry)
 
 
 def build_runtime(config: TelemachusConfig) -> RuntimeLifecycle:

@@ -14,13 +14,14 @@ from telemachus.core.types import (
     PipelineResult,
     PipelineStage,
     RiskLevel,
+    StageRecord,
 )
 from telemachus.governance.autonomy import AutonomyCharter
 from telemachus.governance.decision import DecisionFramework
 from telemachus.governance.ethics import EthicalBoundaryEngine
 from telemachus.governance.risk import RiskEvaluator
 from telemachus.memory.store import MemoryStore
-from telemachus.pipeline import CognitivePipeline, _PipelineTrace, _StageResult
+from telemachus.pipeline import CognitivePipeline, _TraceBuilder
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -50,30 +51,30 @@ def pipeline_with_memory(tmp_path: Path) -> CognitivePipeline:
 # ---------------------------------------------------------------------------
 
 
-class TestStageResult:
-    """Tests for the _StageResult dataclass."""
+class TestStageRecord:
+    """Tests for the StageRecord dataclass (promoted from _StageResult)."""
 
-    def test_stage_result_is_frozen(self) -> None:
-        """_StageResult should be immutable."""
-        result = _StageResult(
+    def test_stage_record_is_frozen(self) -> None:
+        """StageRecord should be immutable."""
+        result = StageRecord(
             stage=PipelineStage.RISK,
             status=True,
-            failure="test",
+            data="test",
         )
         with pytest.raises(FrozenInstanceError):
             result.stage = PipelineStage.ETHICS  # type: ignore[misc]
 
-    def test_stage_result_defaults(self) -> None:
+    def test_stage_record_defaults(self) -> None:
         """Default values should be set correctly."""
-        result = _StageResult(stage=PipelineStage.RISK, status=True)
-        assert result.failure is None
+        result = StageRecord(stage=PipelineStage.RISK, status=True)
+        assert result.data is None
         assert result.error is None
         assert result.blocked is False
         assert result.blocked_reason == ""
 
-    def test_stage_result_blocked(self) -> None:
-        """Blocked stage result should carry reason."""
-        result = _StageResult(
+    def test_stage_record_blocked(self) -> None:
+        """Blocked stage record should carry reason."""
+        result = StageRecord(
             stage=PipelineStage.ETHICS,
             status=False,
             blocked=True,
@@ -88,12 +89,12 @@ class TestStageResult:
 # ---------------------------------------------------------------------------
 
 
-class TestPipelineTrace:
-    """Tests for the _PipelineTrace dataclass."""
+class TestTraceBuilder:
+    """Tests for the _TraceBuilder accumulator (promoted from _PipelineTrace)."""
 
     def test_trace_initial_state(self) -> None:
-        """New trace should have empty stages and not be completed."""
-        trace = _PipelineTrace(trace_id="test-1")
+        """New trace builder should have empty stages and not be completed."""
+        trace = _TraceBuilder(trace_id="test-1", session_id="sess-1", started_at=0.0)
         assert trace.trace_id == "test-1"
         assert len(trace.stages) == 0
         assert trace.completed is False
@@ -101,18 +102,36 @@ class TestPipelineTrace:
 
     def test_add_stage_appends(self) -> None:
         """add_stage should append to the stages list."""
-        trace = _PipelineTrace(trace_id="test-2")
-        result = _StageResult(stage=PipelineStage.RISK, status=True)
+        trace = _TraceBuilder(trace_id="test-2", session_id="sess-2", started_at=0.0)
+        result = StageRecord(stage=PipelineStage.RISK, status=True)
         trace.add_stage(result)
         assert len(trace.stages) == 1
         assert trace.stages[0].stage == PipelineStage.RISK
 
     def test_block_sets_state(self) -> None:
-        """block should set blocked_at and mark incomplete."""
-        trace = _PipelineTrace(trace_id="test-3")
+        """block should set blocked_at, preserve the reason, and mark incomplete.
+
+        Regression: the pre-promotion _PipelineTrace.block() accepted a
+        reason and silently discarded it.
+        """
+        trace = _TraceBuilder(trace_id="test-3", session_id="sess-3", started_at=0.0)
         trace.block(PipelineStage.ETHICS, "Violation")
         assert trace.blocked_at == PipelineStage.ETHICS
+        assert trace.blocked_reason == "Violation"
         assert trace.completed is False
+
+    def test_build_produces_frozen_trace(self) -> None:
+        """build() should snapshot the accumulator into an immutable PipelineTrace."""
+        trace = _TraceBuilder(trace_id="test-4", session_id="sess-4", started_at=1.0)
+        trace.add_stage(StageRecord(stage=PipelineStage.RISK, status=True))
+        snapshot = trace.build(ended_at=2.0)
+        assert snapshot.trace_id == "test-4"
+        assert snapshot.session_id == "sess-4"
+        assert snapshot.started_at == 1.0
+        assert snapshot.ended_at == 2.0
+        assert len(snapshot.stages) == 1
+        with pytest.raises(FrozenInstanceError):
+            snapshot.completed = True  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +201,7 @@ class TestPipelineInit:
         assert available[PipelineStage.REFLECTION] is True
         assert available[PipelineStage.EVOLUTION] is True
         assert available[PipelineStage.COMMUNICATION] is False
-        assert available[PipelineStage.EXECUTION] is False
+        assert available[PipelineStage.EXECUTION] is True
 
 
 # ---------------------------------------------------------------------------

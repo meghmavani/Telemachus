@@ -104,6 +104,37 @@ class TestJsonFormatter:
         assert parsed["exception"]["type"] == "ValueError"
         assert parsed["exception"]["message"] == "test error"
 
+    def test_extra_payload_survives_the_project_convention(self) -> None:
+        """Regression: pipeline.py previously passed structured payloads
+        either positionally (silently absorbed into %-args and never
+        formatted) or as a flat ``extra={...}`` dict (silently dropped,
+        since this formatter only reads ``record.extra``). The fix is
+        the project's established convention: ``extra={"extra": {...}}``.
+        """
+        import io
+
+        formatter = JsonFormatter()
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(formatter)
+        logger = logging.getLogger("telemachus.test.extra_payload")
+        logger.handlers.clear()
+        logger.propagate = False
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+        try:
+            logger.info(
+                "Pipeline processing complete",
+                extra={"extra": {"session_id": "abc", "stages_completed": 10}},
+            )
+        finally:
+            handler.close()
+            logger.removeHandler(handler)
+
+        parsed = json.loads(stream.getvalue().strip())
+        assert parsed["message"] == "Pipeline processing complete"
+        assert parsed["extra"] == {"session_id": "abc", "stages_completed": 10}
+
 
 class TestPlainFormatter:
     """Tests for the plain text log formatter."""

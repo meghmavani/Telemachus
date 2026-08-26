@@ -10,7 +10,7 @@ Pipeline stages:
     3. Ethical boundary check
     4. Autonomy permission check
     5. Decision framework (option ranking)
-    6. Execution (stub — full implementation in Milestone 10)
+    6. Execution — runs an approved ActionRequest through the ToolRegistry
     7. Memory storage
     8. Learning (experience-based behavioral improvement)
     9. Reflection (self-analysis and insight extraction)
@@ -21,72 +21,183 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from telemachus.cognition.evolution import EvolutionEngine, EvolutionStatus
 from telemachus.cognition.learning import LearningEngine
 from telemachus.cognition.reflection import ReflectionEngine
 from telemachus.core.types import (
+    ActionRequest,
     AutonomyDecision,
     AutonomyLevel,
     CommunicationMode,
     EthicalAssessment,
     EthicalVerdict,
+    ExecutionOutcome,
+    ExecutionRecord,
     MemoryDomain,
     PipelineContext,
     PipelineResult,
     PipelineStage,
+    PipelineTrace,
     RiskAssessment,
     RiskLevel,
+    StageRecord,
 )
 from telemachus.governance.autonomy import AutonomyCharter
 from telemachus.governance.decision import DecisionFramework
 from telemachus.governance.ethics import EthicalBoundaryEngine
 from telemachus.governance.risk import RiskEvaluator
 from telemachus.memory.store import MemoryStore
+from telemachus.tools.base import ToolResult
+from telemachus.tools.registry import ToolRegistry
 
 logger = logging.getLogger("telemachus.pipeline")
 
 
 # ---------------------------------------------------------------------------
-# Pipeline stage result tracking
+# Trace accumulation
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class _StageResult:
-    """Internal tracking for a single pipeline stage's outcome."""
-
-    stage: PipelineStage
-    status: bool
-    failure: Any = None
-    error: str | None = None
-    blocked: bool = False
-    blocked_reason: str = ""
-
-
 @dataclass
-class _PipelineTrace:
-    """Complete trace of all pipeline stage results.
+class _TraceBuilder:
+    """Mutable accumulator for one pipeline run's PipelineTrace.
 
-    Not frozen — this is an internal mutable tracking object.
+    Stages are appended as they execute; ``build()`` snapshots the
+    accumulated state into an immutable PipelineTrace. This is called
+    twice per run: once at Stage 7 to obtain the snapshot that gets
+    persisted (stages 1-7 only — Learning/Reflection/Evolution haven't
+    run yet at that point, so ``completed`` is honestly False there),
+    and once more at the true end of ``process()`` (or at a block) to
+    produce the trace exposed via ``CognitivePipeline.last_trace``.
     """
 
     trace_id: str
-    stages: list[_StageResult] = field(default_factory=list)
+    session_id: str
+    started_at: float
+    stages: list[StageRecord] = field(default_factory=list)
     completed: bool = False
     blocked_at: PipelineStage | None = None
+    blocked_reason: str = ""
+    execution: ExecutionRecord | None = None
 
-    def add_stage(self, result: _StageResult) -> None:
-        """Add a stage result to the trace."""
-        self.stages.append(result)
+    def add_stage(self, record: StageRecord) -> None:
+        """Append a stage's result to the trace."""
+        self.stages.append(record)
 
     def block(self, stage: PipelineStage, reason: str) -> None:
-        """Mark the pipeline as blocked at a specific stage."""
+        """Mark the pipeline as blocked at a specific stage, preserving why."""
         self.blocked_at = stage
+        self.blocked_reason = reason
         self.completed = False
+
+    def build(self, ended_at: float) -> PipelineTrace:
+        """Snapshot the current accumulator state into a PipelineTrace."""
+        return PipelineTrace(
+            trace_id=self.trace_id,
+            session_id=self.session_id,
+            started_at=self.started_at,
+            ended_at=ended_at,
+            stages=tuple(self.stages),
+            completed=self.completed,
+            blocked_at=self.blocked_at,
+            blocked_reason=self.blocked_reason,
+            execution=self.execution,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Defensive serialization for persistence
+# ---------------------------------------------------------------------------
+
+
+def _safe_value(value: Any) -> Any:
+    """Best-effort JSON-safe conversion for trace/execution payloads.
+
+    Primitives and enums convert directly; anything else that survives a
+    trial ``json.dumps`` passes through unchanged; anything that doesn't
+    degrades to ``repr()`` rather than raising. This is what keeps a
+    non-serializable stage payload from destroying the Stage 7 memory
+    write it would otherwise be part of.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (list, tuple)):
+        return [_safe_value(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _safe_value(v) for k, v in value.items()}
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return repr(value)
+    else:
+        return value
+
+
+def _stage_record_to_dict(record: StageRecord) -> dict[str, Any]:
+    """Convert one StageRecord into a JSON-safe dict for persistence."""
+    return {
+        "stage": record.stage.name,
+        "status": record.status,
+        "data": _safe_value(record.data),
+        "error": record.error,
+        "blocked": record.blocked,
+        "blocked_reason": record.blocked_reason,
+    }
+
+
+def _execution_record_to_dict(record: ExecutionRecord) -> dict[str, Any]:
+    """Convert an ExecutionRecord into a JSON-safe dict for persistence."""
+    return {
+        "outcome": record.outcome.value,
+        "tool": record.tool,
+        "arguments": _safe_value(record.arguments),
+        "output": _safe_value(record.output),
+        "error": record.error,
+        "duration_ms": record.duration_ms,
+        "autonomy_level": record.autonomy_level,
+    }
+
+
+def _trace_to_dict(trace: PipelineTrace) -> dict[str, Any]:
+    """Convert a PipelineTrace into a JSON-safe dict for persistence."""
+    return {
+        "trace_id": trace.trace_id,
+        "session_id": trace.session_id,
+        "started_at": trace.started_at,
+        "ended_at": trace.ended_at,
+        "stages": [_stage_record_to_dict(s) for s in trace.stages],
+        "completed": trace.completed,
+        "blocked_at": trace.blocked_at.name if trace.blocked_at else None,
+        "blocked_reason": trace.blocked_reason,
+        "execution": (
+            _execution_record_to_dict(trace.execution) if trace.execution else None
+        ),
+    }
+
+
+def _safe_json_dumps(payload: dict[str, Any]) -> str:
+    """Serialize a persistence payload, never raising.
+
+    ``payload`` is expected to already be built from ``_safe_value``
+    conversions, so this should always succeed. The fallback below is a
+    last-resort defense, not the expected path — a serialization failure
+    must not destroy the Stage 7 memory write it is part of.
+    """
+    try:
+        return json.dumps(payload)
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "Trace/execution payload not serializable, using fallback: %s", exc
+        )
+        return json.dumps({"serialization_error": str(exc), "keys": list(payload.keys())})
 
 
 # ---------------------------------------------------------------------------
@@ -98,10 +209,10 @@ class CognitivePipeline:
     """Orchestrates the full cognitive pipeline from input to output.
 
     Composes all governance subsystems (risk, ethics, autonomy, decision),
-    cognition subsystems (learning, reflection), and memory storage into a
-    sequential processing pipeline. Stages that are not yet implemented
-    (communication, execution, evolution) are stubbed and pass through
-    transparently.
+    cognition subsystems (learning, reflection), memory storage, and tool
+    execution into a sequential processing pipeline. Stages that are not
+    yet implemented (communication, evolution) are stubbed and pass
+    through transparently.
 
     Attributes:
         risk_evaluator: The 6-dimension risk evaluator.
@@ -111,6 +222,14 @@ class CognitivePipeline:
         learning_engine: The experience-based learning engine.
         reflection_engine: The self-reflection protocol engine.
         memory_store: The SQLite-backed memory store (optional).
+        tool_registry: The tool registry backing Stage 6 (optional). If
+            None, Stage 6 always yields NO_ACTION (no action requested)
+            or TOOL_NOT_FOUND (an action was requested but nothing can
+            serve it) — it never invents behavior for a missing registry.
+        last_trace: The PipelineTrace from the most recent process() call,
+            or None before the first call. Exposed for introspection and
+            testing; process() keeps its established PipelineResult
+            return type rather than returning the trace directly.
     """
 
     def __init__(
@@ -123,6 +242,7 @@ class CognitivePipeline:
         reflection_engine: ReflectionEngine | None = None,
         evolution_engine: EvolutionEngine | None = None,
         memory_store: MemoryStore | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         """Initialize the cognitive pipeline.
 
@@ -135,6 +255,7 @@ class CognitivePipeline:
             reflection_engine: Reflection engine. Created if None.
             evolution_engine: Evolution engine. Created if None.
             memory_store: Memory store for persistence. Optional.
+            tool_registry: Tool registry for Stage 6 execution. Optional.
         """
         self.risk_evaluator = risk_evaluator or RiskEvaluator()
         self.ethical_engine = ethical_engine or EthicalBoundaryEngine()
@@ -144,6 +265,8 @@ class CognitivePipeline:
         self.reflection_engine = reflection_engine or ReflectionEngine()
         self.evolution_engine = evolution_engine or EvolutionEngine()
         self.memory_store = memory_store
+        self.tool_registry = tool_registry
+        self.last_trace: PipelineTrace | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -161,7 +284,13 @@ class CognitivePipeline:
 
         This is the primary entry point for the cognitive loop. It runs
         all pipeline stages in order, respecting the sequential constraint:
-        no downstream stage may execute before upstream validation.
+        no downstream stage may execute before upstream validation
+        completes.
+
+        To have Stage 6 actually run a tool, place an ``ActionRequest`` at
+        ``context["action"]``. With none supplied (the default for every
+        existing caller), Stage 6 yields ``ExecutionOutcome.NO_ACTION`` and
+        behavior is unchanged from before this stage was implemented.
 
         Args:
             user_input: The raw user input text.
@@ -180,7 +309,11 @@ class CognitivePipeline:
 
         session_id = session_id or str(uuid.uuid4())
         ctx = context or {}
-        trace = _PipelineTrace(trace_id=session_id)
+        trace_builder = _TraceBuilder(
+            trace_id=str(uuid.uuid4()),
+            session_id=session_id,
+            started_at=time.time(),
+        )
 
         # Build the pipeline context
         pipeline_ctx = PipelineContext(
@@ -193,25 +326,27 @@ class CognitivePipeline:
         logger.info(
             "Starting pipeline processing",
             extra={
-                "session_id": session_id,
-                "input_length": len(user_input),
-                "mode": communication_mode.value,
+                "extra": {
+                    "session_id": session_id,
+                    "input_length": len(user_input),
+                    "mode": communication_mode.value,
+                }
             },
         )
 
         # Stage 1: Communication (stub)
         comm_result = self._stage_communication(pipeline_ctx)
-        trace.add_stage(comm_result)
+        trace_builder.add_stage(comm_result)
 
         # Stage 2: Risk evaluation
         risk_result = self._stage_risk(user_input, ctx)
-        trace.add_stage(risk_result)
+        trace_builder.add_stage(risk_result)
         if risk_result.blocked:
             return self._build_blocked_result(
-                pipeline_ctx, trace, risk_result, PipelineStage.RISK
+                pipeline_ctx, trace_builder, risk_result, PipelineStage.RISK
             )
 
-        risk_assessment = risk_result.failure if risk_result.failure else None
+        risk_assessment = risk_result.data if risk_result.data else None
         if risk_assessment is None:
             risk_assessment = RiskAssessment(
                 overall_level=RiskLevel.LOW,
@@ -226,41 +361,50 @@ class CognitivePipeline:
 
         # Stage 3: Ethical boundary check
         ethics_result = self._stage_ethics(user_input, ctx)
-        trace.add_stage(ethics_result)
+        trace_builder.add_stage(ethics_result)
         if ethics_result.blocked:
             return self._build_blocked_result(
-                pipeline_ctx, trace, ethics_result, PipelineStage.ETHICS
+                pipeline_ctx, trace_builder, ethics_result, PipelineStage.ETHICS
             )
 
         ethical_assessment: EthicalAssessment | None = None
-        if isinstance(ethics_result.failure, EthicalAssessment):
-            ethical_assessment = ethics_result.failure
+        if isinstance(ethics_result.data, EthicalAssessment):
+            ethical_assessment = ethics_result.data
 
         # Stage 4: Autonomy permission check
         autonomy_result = self._stage_autonomy(
             user_input, risk_assessment, ctx
         )
-        trace.add_stage(autonomy_result)
+        trace_builder.add_stage(autonomy_result)
         if autonomy_result.blocked:
             return self._build_blocked_result(
-                pipeline_ctx, trace, autonomy_result, PipelineStage.AUTONOMY
+                pipeline_ctx, trace_builder, autonomy_result, PipelineStage.AUTONOMY
             )
 
         autonomy_decision: AutonomyDecision | None = None
-        if isinstance(autonomy_result.failure, AutonomyDecision):
-            autonomy_decision = autonomy_result.failure
+        if isinstance(autonomy_result.data, AutonomyDecision):
+            autonomy_decision = autonomy_result.data
 
         # Stage 5: Decision framework
         decision_result = self._stage_decision(user_input, ctx)
-        trace.add_stage(decision_result)
+        trace_builder.add_stage(decision_result)
 
-        # Stage 6: Execution (stub)
-        execution_result = self._stage_execution(pipeline_ctx)
-        trace.add_stage(execution_result)
+        # Stage 6: Execution
+        execution_stage, execution_record = self._stage_execution(
+            pipeline_ctx, autonomy_decision
+        )
+        trace_builder.add_stage(execution_stage)
+        trace_builder.execution = execution_record
 
-        # Stage 7: Memory storage
-        memory_result = self._stage_memory(pipeline_ctx, ctx)
-        trace.add_stage(memory_result)
+        # Stage 7: Memory storage. This is the pipeline's single
+        # persistence point (no write-ahead persistence): the trace
+        # snapshot taken here covers stages 1-7 only, since Learning,
+        # Reflection, and Evolution (8-10) haven't run yet.
+        trace_snapshot = trace_builder.build(ended_at=time.time())
+        memory_result = self._stage_memory(
+            pipeline_ctx, ctx, trace_snapshot, execution_record
+        )
+        trace_builder.add_stage(memory_result)
 
         # Build the preliminary result for learning/reflection stages
         response = self._build_response(
@@ -276,31 +420,32 @@ class CognitivePipeline:
             risk_assessment=risk_assessment,
             ethical_assessment=ethical_assessment,
             autonomy_decision=autonomy_decision,
-            action_taken=decision_result.failure if decision_result.failure else None,
+            action_taken=decision_result.data if decision_result.data else None,
             metadata={
                 "session_id": session_id,
-                "stages_completed": len(trace.stages),
+                "stages_completed": len(trace_builder.stages),
                 "pipeline_completed": False,
+                "execution": execution_record,
             },
         )
 
         # Stage 8: Learning
         learning_result = self._stage_learning(pipeline_ctx, preliminary_result)
-        trace.add_stage(learning_result)
+        trace_builder.add_stage(learning_result)
 
         # Stage 9: Reflection
         reflection_result = self._stage_reflection(pipeline_ctx, preliminary_result)
-        trace.add_stage(reflection_result)
+        trace_builder.add_stage(reflection_result)
 
         # Stage 10: Evolution
         learning_insights = (
-            learning_result.failure
-            if isinstance(learning_result.failure, list)
+            learning_result.data
+            if isinstance(learning_result.data, list)
             else None
         )
         reflection_insights = (
-            reflection_result.failure
-            if isinstance(reflection_result.failure, list)
+            reflection_result.data
+            if isinstance(reflection_result.data, list)
             else None
         )
         evolution_result = self._stage_evolution(
@@ -308,33 +453,41 @@ class CognitivePipeline:
             learning_insights=learning_insights,
             reflection_insights=reflection_insights,
         )
-        trace.add_stage(evolution_result)
+        trace_builder.add_stage(evolution_result)
 
-        trace.completed = True
+        trace_builder.completed = True
 
         # Merge learning and reflection insights into the final result
         insights: list[str] = []
-        if isinstance(learning_result.failure, list):
-            insights.extend(learning_result.failure)
-        if isinstance(reflection_result.failure, list):
-            insights.extend(reflection_result.failure)
+        if isinstance(learning_result.data, list):
+            insights.extend(learning_result.data)
+        if isinstance(reflection_result.data, list):
+            insights.extend(reflection_result.data)
 
         logger.info(
             "Pipeline processing complete",
-            {"session_id": session_id, "stages_completed": len(trace.stages)},
+            extra={
+                "extra": {
+                    "session_id": session_id,
+                    "stages_completed": len(trace_builder.stages),
+                }
+            },
         )
+
+        self.last_trace = trace_builder.build(ended_at=time.time())
 
         return PipelineResult(
             response=response,
             risk_assessment=risk_assessment,
             ethical_assessment=ethical_assessment,
             autonomy_decision=autonomy_decision,
-            action_taken=decision_result.failure if decision_result.failure else None,
+            action_taken=decision_result.data if decision_result.data else None,
             insights=insights,
             metadata={
                 "session_id": session_id,
-                "stages_completed": len(trace.stages),
-                "pipeline_completed": trace.completed,
+                "stages_completed": len(trace_builder.stages),
+                "pipeline_completed": trace_builder.completed,
+                "execution": execution_record,
             },
         )
 
@@ -342,7 +495,7 @@ class CognitivePipeline:
     # Stage implementations
     # ------------------------------------------------------------------
 
-    def _stage_communication(self, ctx: PipelineContext) -> _StageResult:
+    def _stage_communication(self, ctx: PipelineContext) -> StageRecord:
         """Stub: Communication layer (full implementation in Milestone 7).
 
         In the full implementation, this stage will:
@@ -352,15 +505,15 @@ class CognitivePipeline:
         - Structure response format
         """
         logger.debug("Communication stage (stub)", extra={"input": ctx.user_input[:50]})
-        return _StageResult(
+        return StageRecord(
             stage=PipelineStage.COMMUNICATION,
             status=True,
-            failure="Communication stage not yet implemented.",
+            data="Communication stage not yet implemented.",
         )
 
     def _stage_risk(
         self, action: str, ctx: dict[str, Any]
-    ) -> _StageResult:
+    ) -> StageRecord:
         """Stage 2: Evaluate action risk across 6 dimensions.
 
         Args:
@@ -368,26 +521,28 @@ class CognitivePipeline:
             ctx: Contextual information.
 
         Returns:
-            A _StageResult with the RiskAssessment.
+            A StageRecord with the RiskAssessment.
         """
         try:
             assessment = self.risk_evaluator.evaluate(action, context=ctx)
             logger.debug(
                 "Risk evaluation complete",
-                {
-                    "overall": assessment.overall_level.name,
-                    "reversibility": assessment.reversibility.name,
-                    "resource": assessment.resource.name,
+                extra={
+                    "extra": {
+                        "overall": assessment.overall_level.name,
+                        "reversibility": assessment.reversibility.name,
+                        "resource": assessment.resource.name,
+                    }
                 },
             )
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.RISK,
                 status=True,
-                failure=assessment,
+                data=assessment,
             )
         except Exception as exc:
             logger.error("Risk evaluation failed", exc_info=exc)
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.RISK,
                 status=False,
                 blocked=True,
@@ -396,7 +551,7 @@ class CognitivePipeline:
 
     def _stage_ethics(
         self, action: str, ctx: dict[str, Any]
-    ) -> _StageResult:
+    ) -> StageRecord:
         """Stage 3: Check ethical boundaries and sacred constraints.
 
         Args:
@@ -404,17 +559,17 @@ class CognitivePipeline:
             ctx: Contextual information.
 
         Returns:
-            A _StageResult with the EthicalAssessment.
+            A StageRecord with the EthicalAssessment.
         """
         try:
             assessment = self.ethical_engine.evaluate(action, context=ctx)
             logger.debug(
                 "Ethical evaluation complete",
-                {"verdict": assessment.verdict.value},
+                extra={"extra": {"verdict": assessment.verdict.value}},
             )
 
             if assessment.verdict == EthicalVerdict.BLOCKED:
-                return _StageResult(
+                return StageRecord(
                     stage=PipelineStage.ETHICS,
                     status=False,
                     blocked=True,
@@ -422,17 +577,17 @@ class CognitivePipeline:
                         f"Action blocked by ethical constraints: "
                         f"{', '.join(assessment.violated_constraints)}"
                     ),
-                    failure=assessment,
+                    data=assessment,
                 )
 
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.ETHICS,
                 status=True,
-                failure=assessment,
+                data=assessment,
             )
         except Exception as exc:
             logger.error("Ethical evaluation failed", exc_info=exc)
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.ETHICS,
                 status=False,
                 blocked=True,
@@ -444,7 +599,7 @@ class CognitivePipeline:
         action: str,
         risk_assessment: RiskAssessment,
         ctx: dict[str, Any],
-    ) -> _StageResult:
+    ) -> StageRecord:
         """Stage 4: Check autonomy permissions for the action.
 
         Args:
@@ -453,7 +608,7 @@ class CognitivePipeline:
             ctx: Contextual information.
 
         Returns:
-            A _StageResult with the AutonomyDecision.
+            A StageRecord with the AutonomyDecision.
         """
         try:
             domain = ctx.get("domain", "research")
@@ -465,17 +620,21 @@ class CognitivePipeline:
             )
             logger.debug(
                 "Autonomy check complete",
-                {
-                    "level": decision.level.name,
-                    "allowed": decision.allowed,
-                    "requires_discussion": decision.requires_discussion,
+                extra={
+                    "extra": {
+                        "level": decision.level.name,
+                        "allowed": decision.allowed,
+                        "requires_discussion": decision.requires_discussion,
+                    }
                 },
             )
 
             # Only hard-block on OBSERVATION (sacred constraint violation).
-            # SUGGESTION and LIMITED are soft constraints — continue but flag.
+            # SUGGESTION and LIMITED are soft constraints — continue but
+            # flag; Stage 6 applies its own, stricter gate before letting
+            # anything with side effects run (see _stage_execution).
             if decision.level == AutonomyLevel.OBSERVATION:
-                return _StageResult(
+                return StageRecord(
                     stage=PipelineStage.AUTONOMY,
                     status=False,
                     blocked=True,
@@ -483,17 +642,17 @@ class CognitivePipeline:
                         f"Action blocked at autonomy level "
                         f"{decision.level.name}: {decision.reasoning}"
                     ),
-                    failure=decision,
+                    data=decision,
                 )
 
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.AUTONOMY,
                 status=True,
-                failure=decision,
+                data=decision,
             )
         except Exception as exc:
             logger.error("Autonomy check failed", exc_info=exc)
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.AUTONOMY,
                 status=False,
                 blocked=True,
@@ -502,7 +661,7 @@ class CognitivePipeline:
 
     def _stage_decision(
         self, action: str, ctx: dict[str, Any]
-    ) -> _StageResult:
+    ) -> StageRecord:
         """Stage 5: Rank options using the decision framework.
 
         Args:
@@ -510,7 +669,7 @@ class CognitivePipeline:
             ctx: Contextual information.
 
         Returns:
-            A _StageResult with the decision result.
+            A StageRecord with the decision result.
         """
         try:
             options = ctx.get("options", [action])
@@ -528,89 +687,327 @@ class CognitivePipeline:
 
             logger.debug(
                 "Decision evaluation complete",
-                {
-                    "options_count": len(options),
-                    "best_option": best[:50],
-                    "requires_discussion": result.requires_discussion,
+                extra={
+                    "extra": {
+                        "options_count": len(options),
+                        "best_option": best[:50],
+                        "requires_discussion": result.requires_discussion,
+                    }
                 },
             )
 
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.DECISION,
                 status=True,
-                failure=best,
+                data=best,
             )
         except Exception as exc:
             logger.error("Decision evaluation failed", exc_info=exc)
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.DECISION,
                 status=False,
-                failure=action,
+                data=action,
             )
 
-    def _stage_execution(self, ctx: PipelineContext) -> _StageResult:
-        """Stage 6: Execute the selected action (stub).
+    def _stage_execution(
+        self,
+        ctx: PipelineContext,
+        autonomy_decision: AutonomyDecision | None,
+    ) -> tuple[StageRecord, ExecutionRecord]:
+        """Stage 6: Execute an approved action through the tool registry.
 
-        Full implementation in Milestone 10 (Tool System).
+        Runs only when the caller supplied an ``ActionRequest`` at
+        ``ctx.metadata["action"]`` — nothing in the pipeline produces one
+        on its own yet; that is planning/Event-Loop-shaped work and is
+        out of scope here. With none supplied, this yields NO_ACTION and
+        behaves exactly as the previous stub did.
+
+        Authorization is a two-layer check, corresponding to two
+        different questions:
+
+        - The autonomy gate below decides whether *any* side effect may
+          occur at all. Per codex/operations/AUTONOMY_CHARTER.md, Level 1
+          (Suggestion) is propose-only; Level 2 (Limited) is the first
+          level that permits low-risk, reversible action. This is
+          stricter than Stage 4's own block, which only hard-blocks at
+          OBSERVATION — Stage 4 asks "may reasoning continue?", this asks
+          "may a side effect occur?".
+        - ``ToolRegistry.check_permission()`` then decides whether *this
+          specific tool* may run (sacred domains, approval requirements,
+          trust) — "capability does not imply permission"
+          (codex/operations/TOOL_CREATION_FRAMEWORK.md).
+
+        Never raises: every failure mode is classified into an
+        ExecutionOutcome and returned alongside its StageRecord.
+
+        Args:
+            ctx: The pipeline context (its metadata carries the optional
+                ActionRequest).
+            autonomy_decision: The AutonomyDecision from Stage 4.
+
+        Returns:
+            A tuple of (StageRecord, ExecutionRecord). The ExecutionRecord
+            is also embedded in the StageRecord's ``data`` field.
         """
-        logger.debug("Execution stage: stub")
-        return _StageResult(
-            stage=PipelineStage.EXECUTION,
-            status=True,
-            failure="Execution stage not yet implemented.",
+        autonomy_level = autonomy_decision.level.name if autonomy_decision else None
+        action_request = ctx.metadata.get("action")
+
+        if action_request is None:
+            record = ExecutionRecord(
+                outcome=ExecutionOutcome.NO_ACTION, autonomy_level=autonomy_level
+            )
+            return (
+                StageRecord(stage=PipelineStage.EXECUTION, status=True, data=record),
+                record,
+            )
+
+        if not isinstance(action_request, ActionRequest):
+            record = ExecutionRecord(
+                outcome=ExecutionOutcome.NO_ACTION,
+                error="metadata['action'] is not an ActionRequest; ignored",
+                autonomy_level=autonomy_level,
+            )
+            return (
+                StageRecord(stage=PipelineStage.EXECUTION, status=True, data=record),
+                record,
+            )
+
+        try:
+            record = self._execute_action(action_request, autonomy_decision, autonomy_level)
+        except Exception as exc:
+            # Defense in depth: ToolRegistry.execute() already contains
+            # tool.validate()/execute() exceptions internally. This only
+            # guards Core's own classification logic above (tool lookup,
+            # permission check) from an unforeseen failure.
+            logger.error("Execution stage failed unexpectedly", exc_info=exc)
+            record = ExecutionRecord(
+                outcome=ExecutionOutcome.TOOL_ERROR,
+                tool=action_request.tool,
+                arguments=action_request.arguments,
+                error=str(exc),
+                autonomy_level=autonomy_level,
+            )
+            return (
+                StageRecord(
+                    stage=PipelineStage.EXECUTION,
+                    status=False,
+                    data=record,
+                    error=str(exc),
+                ),
+                record,
+            )
+
+        logger.debug(
+            "Execution stage complete",
+            extra={
+                "extra": {
+                    "outcome": record.outcome.value,
+                    "tool": record.tool,
+                    "duration_ms": record.duration_ms,
+                }
+            },
+        )
+        return (
+            StageRecord(stage=PipelineStage.EXECUTION, status=True, data=record),
+            record,
+        )
+
+    def _execute_action(
+        self,
+        action_request: ActionRequest,
+        autonomy_decision: AutonomyDecision | None,
+        autonomy_level: str | None,
+    ) -> ExecutionRecord:
+        """Authorize and run one ActionRequest.
+
+        Split out of ``_stage_execution`` for readability; may raise on
+        a genuinely unexpected failure, which the caller classifies as
+        TOOL_ERROR rather than letting escape.
+        """
+        authorized = (
+            autonomy_decision is not None
+            and autonomy_decision.allowed
+            and autonomy_decision.level.value >= AutonomyLevel.LIMITED.value
+            and not autonomy_decision.requires_approval
+        )
+        if not authorized:
+            reason = (
+                autonomy_decision.reasoning
+                if autonomy_decision is not None
+                else "No autonomy decision available"
+            )
+            return ExecutionRecord(
+                outcome=ExecutionOutcome.DENIED_AUTONOMY,
+                tool=action_request.tool,
+                arguments=action_request.arguments,
+                error=f"Autonomy gate denied execution: {reason}",
+                autonomy_level=autonomy_level,
+            )
+
+        if self.tool_registry is None:
+            return ExecutionRecord(
+                outcome=ExecutionOutcome.TOOL_NOT_FOUND,
+                tool=action_request.tool,
+                arguments=action_request.arguments,
+                error="No tool registry configured",
+                autonomy_level=autonomy_level,
+            )
+
+        if self.tool_registry.get_tool(action_request.tool) is None:
+            return ExecutionRecord(
+                outcome=ExecutionOutcome.TOOL_NOT_FOUND,
+                tool=action_request.tool,
+                arguments=action_request.arguments,
+                error=f"Tool '{action_request.tool}' not found in registry",
+                autonomy_level=autonomy_level,
+            )
+
+        permission = self.tool_registry.check_permission(action_request.tool)
+        if not permission["allowed"]:
+            return ExecutionRecord(
+                outcome=ExecutionOutcome.DENIED_TOOL,
+                tool=action_request.tool,
+                arguments=action_request.arguments,
+                error=str(permission["reason"]),
+                autonomy_level=autonomy_level,
+            )
+
+        started = time.monotonic()
+        # require_permission=False: Core already checked permission above;
+        # the registry's own recheck would be a redundant second opinion,
+        # not a stronger guarantee.
+        result: ToolResult = self.tool_registry.execute(
+            action_request.tool, require_permission=False, **action_request.arguments
+        )
+        duration_ms = (time.monotonic() - started) * 1000
+
+        if result.success:
+            return ExecutionRecord(
+                outcome=ExecutionOutcome.SUCCEEDED,
+                tool=action_request.tool,
+                arguments=action_request.arguments,
+                output=result.output,
+                duration_ms=duration_ms,
+                autonomy_level=autonomy_level,
+            )
+
+        # ToolResult carries only a boolean and a message; classifying
+        # more finely means reading registry.py's own message text, which
+        # is stable, documented production code (not a test fixture).
+        error_message = result.error or ""
+        if "validation" in error_message:
+            outcome = ExecutionOutcome.INVALID_ARGUMENTS
+        elif "execution error" in error_message:
+            outcome = ExecutionOutcome.TOOL_ERROR
+        else:
+            outcome = ExecutionOutcome.TOOL_FAILED
+
+        return ExecutionRecord(
+            outcome=outcome,
+            tool=action_request.tool,
+            arguments=action_request.arguments,
+            error=result.error,
+            duration_ms=duration_ms,
+            autonomy_level=autonomy_level,
         )
 
     def _stage_memory(
-        self, ctx: PipelineContext, extra: dict[str, Any]
-    ) -> _StageResult:
-        """Stage 7: Store the interaction in memory.
+        self,
+        ctx: PipelineContext,
+        extra: dict[str, Any],
+        trace: PipelineTrace,
+        execution_record: ExecutionRecord,
+    ) -> StageRecord:
+        """Stage 7: Store the interaction, trace snapshot, and execution record.
+
+        This is the pipeline's single persistence point — no write-ahead
+        persistence. ``trace`` reflects stages 1-7 only: Learning,
+        Reflection, and Evolution (8-10) run after this stage and persist
+        their own state separately under MemoryDomain.REFLECTION, as
+        before.
+
+        The ExecutionRecord is persisted to MemoryDomain.TOOL (Tool
+        Memory — codex/operations/MEMORY_ARCHITECTURE.md §6) only when an
+        action was actually requested; NO_ACTION runs never create tool
+        execution history.
 
         Args:
             ctx: The pipeline context.
             extra: Additional context for storage.
+            trace: The trace snapshot through Stage 7.
+            execution_record: The Stage 6 execution outcome.
 
         Returns:
-            A _StageResult indicating storage success.
+            A StageRecord indicating storage success.
         """
         if self.memory_store is None:
             logger.debug("Memory stage: no store configured, skipping")
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.MEMORY,
                 status=True,
-                failure="No memory store configured.",
+                data="No memory store configured.",
             )
 
         try:
+            # `extra` is the caller-supplied context dict — it may now
+            # carry an ActionRequest (or anything else a caller puts in
+            # `context=`), so it needs the same defensive conversion as
+            # trace/execution payloads before MemoryStore.store() runs
+            # its own, unguarded json.dumps() over it as `metadata=`.
+            safe_extra = _safe_value(extra)
+
             # Store in project memory as a conversation entry
             self.memory_store.store(
                 domain=MemoryDomain.PROJECT,
-                content=json.dumps({
+                content=_safe_json_dumps({
                     "type": "pipeline_interaction",
                     "user_input": ctx.user_input,
                     "session_id": ctx.session_id,
                     "mode": ctx.communication_mode.value,
-                    "metadata": extra,
+                    "metadata": safe_extra,
+                    "trace": _trace_to_dict(trace),
                 }),
-                metadata=extra,
+                metadata=safe_extra,
                 index_keys={"type": "pipeline_interaction"},
             )
             logger.debug("Memory storage complete")
-            return _StageResult(
+
+            if execution_record.outcome is not ExecutionOutcome.NO_ACTION:
+                try:
+                    self.memory_store.store(
+                        domain=MemoryDomain.TOOL,
+                        content=_safe_json_dumps(
+                            _execution_record_to_dict(execution_record)
+                        ),
+                        metadata={
+                            "type": "tool_execution",
+                            "session_id": ctx.session_id,
+                            "outcome": execution_record.outcome.value,
+                        },
+                        index_keys={
+                            "type": "tool_execution",
+                            "tool": execution_record.tool or "",
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to persist execution record: %s", exc)
+
+            return StageRecord(
                 stage=PipelineStage.MEMORY,
                 status=True,
-                failure="Stored in memory.",
+                data="Stored in memory.",
             )
         except Exception as exc:
             logger.error("Memory storage failed", exc_info=exc)
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.MEMORY,
                 status=False,
-                failure=f"Memory storage error: {exc}",
+                data=f"Memory storage error: {exc}",
             )
 
     def _stage_learning(
         self, ctx: PipelineContext, result: PipelineResult
-    ) -> _StageResult:
+    ) -> StageRecord:
         """Stage 8: Process experience through the learning engine.
 
         Extracts learning signals from the pipeline result and updates
@@ -644,22 +1041,22 @@ class CognitivePipeline:
                 except Exception as exc:
                     logger.warning("Failed to persist learning state: %s", exc)
 
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.LEARNING,
                 status=True,
-                failure=update.insights,
+                data=update.insights,
             )
         except Exception as exc:
             logger.error("Learning stage failed", exc_info=exc)
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.LEARNING,
                 status=False,
-                failure=f"Learning error: {exc}",
+                data=f"Learning error: {exc}",
             )
 
     def _stage_reflection(
         self, ctx: PipelineContext, result: PipelineResult
-    ) -> _StageResult:
+    ) -> StageRecord:
         """Stage 9: Perform self-reflection on the interaction.
 
         Analyzes the outcome, extracts insights, and generates
@@ -694,17 +1091,17 @@ class CognitivePipeline:
                 except Exception as exc:
                     logger.warning("Failed to persist reflection state: %s", exc)
 
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.REFLECTION,
                 status=True,
-                failure=output.insights,
+                data=output.insights,
             )
         except Exception as exc:
             logger.error("Reflection stage failed", exc_info=exc)
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.REFLECTION,
                 status=False,
-                failure=f"Reflection error: {exc}",
+                data=f"Reflection error: {exc}",
             )
 
     def _stage_evolution(
@@ -712,7 +1109,7 @@ class CognitivePipeline:
         ctx: PipelineContext,
         learning_insights: list[str] | None = None,
         reflection_insights: list[str] | None = None,
-    ) -> _StageResult:
+    ) -> StageRecord:
         """Stage 10: Long-term evolution updates.
 
         Processes learning and reflection insights through the EvolutionEngine
@@ -725,8 +1122,7 @@ class CognitivePipeline:
             reflection_insights: Insights from the reflection stage.
 
         Returns:
-            A _StageResult with evolution proposals in the failure field
-            (following the pipeline convention of using failure for data).
+            A StageRecord with evolution proposals in the ``data`` field.
         """
         try:
             proposals = self.evolution_engine.process_evolution_stage(
@@ -767,23 +1163,23 @@ class CognitivePipeline:
                         "Failed to persist evolution state: %s", exc
                     )
 
-            # Return proposal summaries as the failure field (data carrier)
+            # Return proposal summaries as the data field (data carrier)
             proposal_summaries = [
                 f"[{p.status.value}] {p.evolution_type.value}: {p.description[:100]}"
                 for p in proposals
             ]
 
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.EVOLUTION,
                 status=True,
-                failure=proposal_summaries,
+                data=proposal_summaries,
             )
         except Exception as exc:
             logger.error("Evolution stage failed", exc_info=exc)
-            return _StageResult(
+            return StageRecord(
                 stage=PipelineStage.EVOLUTION,
                 status=False,
-                failure=f"Evolution error: {exc}",
+                data=f"Evolution error: {exc}",
             )
 
     # ------------------------------------------------------------------
@@ -796,14 +1192,14 @@ class CognitivePipeline:
         risk: RiskAssessment,
         ethics: EthicalAssessment | None,
         autonomy: AutonomyDecision | None,
-        decision: _StageResult,
+        decision: StageRecord,
     ) -> str:
         """Build a human-readable response from pipeline results.
 
         Args:
             ctx: The pipeline context.
             risk: The risk assessment.
-            ethical: The ethical assessment (if any).
+            ethics: The ethical assessment (if any).
             autonomy: The autonomy decision (if any).
             decision: The decision stage result.
 
@@ -828,35 +1224,37 @@ class CognitivePipeline:
                 f"(allowed={autonomy.allowed})"
             )
 
-        if decision.status and decision.failure:
-            parts.append(f"Selected action: {decision.failure}")
+        if decision.status and decision.data:
+            parts.append(f"Selected action: {decision.data}")
 
         return "\n".join(parts)
 
-    @staticmethod
     def _build_blocked_result(
+        self,
         ctx: PipelineContext,
-        trace: _PipelineTrace,
-        stage_result: _StageResult,
+        trace_builder: _TraceBuilder,
+        stage_result: StageRecord,
         stage: PipelineStage,
     ) -> PipelineResult:
         """Build a PipelineResult when the pipeline is blocked.
 
         Args:
             ctx: The pipeline context.
-            trace: The pipeline trace.
+            trace_builder: The in-progress trace accumulator.
             stage_result: The blocking stage result.
             stage: The stage at which the pipeline was blocked.
 
         Returns:
             A PipelineResult indicating the block.
         """
-        trace.block(stage, stage_result.blocked_reason)
+        trace_builder.block(stage, stage_result.blocked_reason)
         logger.warning(
             "Pipeline blocked",
-            {
-                "stage": stage.name,
-                "reason": stage_result.blocked_reason,
+            extra={
+                "extra": {
+                    "stage": stage.name,
+                    "reason": stage_result.blocked_reason,
+                }
             },
         )
 
@@ -865,13 +1263,15 @@ class CognitivePipeline:
         ethical_assessment: EthicalAssessment | None = None
         autonomy_decision: AutonomyDecision | None = None
 
-        for sr in trace.stages:
-            if sr.stage == PipelineStage.RISK and isinstance(sr.failure, RiskAssessment):
-                risk_assessment = sr.failure
-            elif sr.stage == PipelineStage.ETHICS and isinstance(sr.failure, EthicalAssessment):
-                ethical_assessment = sr.failure
-            elif sr.stage == PipelineStage.AUTONOMY and isinstance(sr.failure, AutonomyDecision):
-                autonomy_decision = sr.failure
+        for sr in trace_builder.stages:
+            if sr.stage == PipelineStage.RISK and isinstance(sr.data, RiskAssessment):
+                risk_assessment = sr.data
+            elif sr.stage == PipelineStage.ETHICS and isinstance(sr.data, EthicalAssessment):
+                ethical_assessment = sr.data
+            elif sr.stage == PipelineStage.AUTONOMY and isinstance(sr.data, AutonomyDecision):
+                autonomy_decision = sr.data
+
+        self.last_trace = trace_builder.build(ended_at=time.time())
 
         return PipelineResult(
             response=(
@@ -883,7 +1283,7 @@ class CognitivePipeline:
             autonomy_decision=autonomy_decision,
             metadata={
                 "session_id": ctx.session_id,
-                "stages_completed": len(trace.stages),
+                "stages_completed": len(trace_builder.stages),
                 "blocked_at": stage.name,
                 "blocked_reason": stage_result.blocked_reason,
                 "pipeline_completed": False,
@@ -914,7 +1314,7 @@ class CognitivePipeline:
             PipelineStage.ETHICS: True,
             PipelineStage.AUTONOMY: True,
             PipelineStage.DECISION: True,
-            PipelineStage.EXECUTION: False,  # Stub
+            PipelineStage.EXECUTION: True,
             PipelineStage.MEMORY: True,
             PipelineStage.LEARNING: True,
             PipelineStage.REFLECTION: True,

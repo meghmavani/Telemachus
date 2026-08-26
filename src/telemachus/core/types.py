@@ -171,3 +171,131 @@ class PipelineResult:
     action_taken: str | None = None
     insights: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Execution boundary (Stage 6)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ActionRequest:
+    """A caller-supplied request to execute a specific tool.
+
+    This is an execution-boundary contract, not a planning architecture.
+    Callers that want Stage 6 to do work place one of these at
+    ``PipelineContext.metadata["action"]``. Nothing in the pipeline
+    currently produces one on its own — that is future, out-of-scope work
+    (planning integration, the Event Loop, or an LLM-driven planner).
+
+    Attributes:
+        tool: The registered tool name to invoke.
+        arguments: Keyword arguments passed to the tool's execute/validate.
+        description: Optional human-readable description of the action,
+            for logging and trace readability.
+    """
+
+    tool: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    description: str = ""
+
+
+class ExecutionOutcome(Enum):
+    """The classified result of Stage 6 (Execution).
+
+    Every outcome is reachable without the pipeline ever raising: Stage 6
+    classifies and returns, it never propagates an exception.
+    """
+
+    NO_ACTION = "no_action"  # No ActionRequest was supplied.
+    DENIED_AUTONOMY = "denied_autonomy"  # Autonomy gate refused execution.
+    TOOL_NOT_FOUND = "tool_not_found"  # No tool registered under that name.
+    DENIED_TOOL = "denied_tool"  # Registry-level permission check refused.
+    INVALID_ARGUMENTS = "invalid_arguments"  # Tool validation failed.
+    TOOL_FAILED = "tool_failed"  # Tool ran and reported failure.
+    TOOL_ERROR = "tool_error"  # Tool raised; the registry contained it.
+    SUCCEEDED = "succeeded"
+
+
+@dataclass(frozen=True)
+class ExecutionRecord:
+    """What Stage 6 (Execution) actually did, for tracing and Tool Memory.
+
+    Persisted to ``MemoryDomain.TOOL`` when a memory store is configured
+    (codex/operations/MEMORY_ARCHITECTURE.md, "Tool Memory": tool usage
+    history, performance metrics, reliability patterns, success/failure
+    rates).
+
+    Attributes:
+        outcome: The classified result.
+        tool: The tool name requested, if an ActionRequest was supplied.
+        arguments: The arguments the tool was invoked with.
+        output: The tool's output on success, if any.
+        error: A human-readable error message, for any non-success outcome.
+        duration_ms: Wall-clock time spent inside the registry call.
+        autonomy_level: The AutonomyLevel name in effect at execution time.
+    """
+
+    outcome: ExecutionOutcome
+    tool: str | None = None
+    arguments: dict[str, Any] = field(default_factory=dict)
+    output: Any = None
+    error: str | None = None
+    duration_ms: float = 0.0
+    autonomy_level: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Pipeline trace
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StageRecord:
+    """The outcome of a single pipeline stage, for tracing.
+
+    Attributes:
+        stage: Which stage this record describes.
+        status: Whether the stage completed without an internal error.
+        data: The stage's payload on success (an assessment, a decision,
+            a selected option, ...). Named ``data``, not ``failure`` —
+            it holds success information on nearly every stage.
+        error: An error message, if the stage failed internally.
+        blocked: Whether this stage blocked the pipeline.
+        blocked_reason: Why, if ``blocked`` is True.
+    """
+
+    stage: PipelineStage
+    status: bool
+    data: Any = None
+    error: str | None = None
+    blocked: bool = False
+    blocked_reason: str = ""
+
+
+@dataclass(frozen=True)
+class PipelineTrace:
+    """A complete, persistable record of one pipeline run.
+
+    Attributes:
+        trace_id: Unique identifier for this trace.
+        session_id: The session this run belongs to.
+        started_at: Unix timestamp when processing began.
+        ended_at: Unix timestamp when processing concluded (success or
+            block).
+        stages: Every StageRecord produced, in execution order.
+        completed: True only if every stage ran without being blocked.
+        blocked_at: Which stage blocked the pipeline, if any.
+        blocked_reason: Why it blocked, if ``blocked_at`` is set.
+        execution: The Stage 6 ExecutionRecord, if execution ran.
+    """
+
+    trace_id: str
+    session_id: str
+    started_at: float
+    ended_at: float
+    stages: tuple[StageRecord, ...] = ()
+    completed: bool = False
+    blocked_at: PipelineStage | None = None
+    blocked_reason: str = ""
+    execution: ExecutionRecord | None = None
