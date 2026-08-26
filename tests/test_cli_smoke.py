@@ -36,9 +36,9 @@ def project(tmp_path, monkeypatch):
         "[identity]\n"
         'name = "Telemachus"\n'
         "[paths]\n"
-        f'data_dir = "{tmp_path / "data"}"\n'
-        f'codex_dir = "{codex}"\n'
-        f'log_dir = "{tmp_path / "logs"}"\n'
+        f"data_dir = '{tmp_path / 'data'}'\n"
+        f"codex_dir = '{codex}'\n"
+        f"log_dir = '{tmp_path / 'logs'}'\n"
         "[bootstrap]\n"
         "first_awakening = false\n"
     )
