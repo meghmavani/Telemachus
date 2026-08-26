@@ -19,7 +19,8 @@ from telemachus import __version__
 from telemachus.bootstrap import BootstrapProtocol, BootstrapResult
 from telemachus.config import ConfigError, TelemachusConfig, load_config_from_path
 from telemachus.logging_config import get_logger, setup_logging
-from telemachus.wiring import build_memory_store
+from telemachus.runtime import PreviousTermination, RecoveryBriefing
+from telemachus.wiring import build_runtime
 
 app = typer.Typer(
     name="telemachus",
@@ -87,39 +88,43 @@ def start(
     # Display startup information
     _display_startup_info(config)
 
-    # Run the 5-phase bootstrap protocol
-    console.print("\n[bold]Bootstrapping...[/bold]")
-    memory_store = build_memory_store(config)
-    bootstrap = BootstrapProtocol(config=config, memory_store=memory_store)
-    result = bootstrap.bootstrap()
+    # Delegate lifecycle ownership to the Runtime. It installs signal
+    # handlers, opens runtime.db, determines installation/recovery state,
+    # runs the Core's five-phase bootstrap protocol at the correct point,
+    # and reaches RUNNING (or FAILED).
+    console.print("\n[bold]Starting Runtime...[/bold]")
+    runtime = build_runtime(config)
+    result = runtime.start()
 
     # Display bootstrap results
     _display_bootstrap_result(result)
+    _display_recovery_briefing(runtime.recovery_briefing)
 
     if not result.success:
         console.print(
             "\n[bold red]Bootstrap failed.[/bold red] "
             "Check logs for details."
         )
+        runtime.shutdown()
         raise typer.Exit(code=1)
 
     # Display first awakening questions if this is a first awakening
-    if result.first_awakening:
-        _display_first_awakening(bootstrap)
+    if result.first_awakening and runtime.bootstrap_protocol is not None:
+        _display_first_awakening(runtime.bootstrap_protocol)
 
-    log.info("Telemachus started successfully")
+    log.info(
+        "Telemachus started successfully",
+        extra={"extra": {"lifecycle_state": runtime.state.value}},
+    )
     console.print("\n[green]✓[/green] Telemachus is running.")
     console.print("[dim]Press Ctrl+C to shut down.[/dim]")
 
     try:
-        # Main loop placeholder — will be replaced with actual event loop
-        import time
-
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
+        runtime.wait_for_shutdown_request()
+    finally:
         log.info("Shutdown signal received")
         console.print("\n[yellow]Shutting down...[/yellow]")
+        runtime.shutdown()
         log.info("Telemachus shutdown complete")
         console.print("[green]Goodbye.[/green]")
 
@@ -248,6 +253,41 @@ def _display_bootstrap_result(result: BootstrapResult) -> None:
         console.print("\n[bold red]Errors:[/bold red]")
         for error in result.errors:
             console.print(f"  [red]•[/red] {error}")
+
+
+def _display_recovery_briefing(briefing: RecoveryBriefing | None) -> None:
+    """Display what Runtime Recovery/Reconciliation found, plainly.
+
+    Delivered here, in the startup summary for `telemachus start`, per
+    docs/lifecycle.md: the operator ran this command deliberately, so
+    this is not an unwanted interruption. Reports facts only — no
+    interpretation, which remains Core work.
+
+    Args:
+        briefing: The Runtime's RecoveryBriefing, or None if unavailable.
+    """
+    if briefing is None:
+        return
+
+    if briefing.is_new_installation:
+        console.print("[dim]New Runtime installation — no prior session to recover.[/dim]")
+        return
+
+    if briefing.previous_termination == PreviousTermination.UNCLEAN:
+        last_state = (
+            briefing.previous_session.last_state
+            if briefing.previous_session is not None
+            else "unknown"
+        )
+        console.print(
+            f"[yellow]Previous session did not shut down cleanly[/yellow] "
+            f"[dim](last recorded state: {last_state})[/dim]"
+        )
+    elif briefing.previous_termination == PreviousTermination.CLEAN:
+        console.print("[dim]Previous session ended cleanly.[/dim]")
+
+    if briefing.offline_seconds is not None:
+        console.print(f"[dim]Offline for approximately {briefing.offline_seconds:.0f}s.[/dim]")
 
 
 def _display_first_awakening(bootstrap: BootstrapProtocol) -> None:

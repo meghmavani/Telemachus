@@ -13,12 +13,17 @@ real pipeline. Nothing here is mocked except the interactive prompt.
 
 from __future__ import annotations
 
+import inspect
+from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
 
+import telemachus.main as main_module
 from telemachus.config import load_config_from_path
 from telemachus.main import app
-from telemachus.wiring import build_memory_store, build_pipeline
+from telemachus.runtime.states import LifecycleState
+from telemachus.wiring import build_memory_store, build_pipeline, build_runtime
 
 runner = CliRunner()
 
@@ -138,3 +143,54 @@ def test_store_search_finds_stored_content(project):
         assert len(store.search("", limit=1)) == 1
     finally:
         store.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# Runtime — build_runtime() through the same composition root
+# ---------------------------------------------------------------------------
+
+
+def test_build_runtime_is_usable_immediately(project):
+    """The Runtime the composition root builds must actually start and stop."""
+    config = load_config_from_path(project)
+    config.paths.data_dir.mkdir(parents=True, exist_ok=True)
+
+    runtime = build_runtime(config)
+    assert runtime.state == LifecycleState.BOOTING
+
+    result = runtime.start()
+    try:
+        assert result.success
+        assert runtime.state == LifecycleState.RUNNING
+        assert runtime.memory_store is not None
+        assert runtime.memory_store.conn is not None
+    finally:
+        runtime.shutdown()
+
+    assert runtime.state == LifecycleState.STOPPED
+    assert runtime.memory_store.conn is None
+
+
+def test_runtime_start_shutdown_leaves_no_wal_sidecars(project):
+    """Integration-level regression test for F-02, through the real composition
+    root and a real temp project — not just the unit-level runtime tests."""
+    config = load_config_from_path(project)
+    config.paths.data_dir.mkdir(parents=True, exist_ok=True)
+
+    runtime = build_runtime(config)
+    runtime.start()
+    runtime.shutdown()
+
+    telemachus_db = config.paths.data_dir / config.database.path
+    runtime_db = config.paths.data_dir / "runtime.db"
+    for db in (telemachus_db, runtime_db):
+        assert not Path(str(db) + "-wal").exists()
+        assert not Path(str(db) + "-shm").exists()
+
+
+def test_main_start_has_no_placeholder_sleep_loop():
+    """Regression guard: `telemachus start` must delegate to the Runtime's
+    interruptible wait, not the old `while True: time.sleep(1)` loop."""
+    source = Path(inspect.getfile(main_module)).read_text(encoding="utf-8")
+    assert "while True" not in source
+    assert "time.sleep(1)" not in source

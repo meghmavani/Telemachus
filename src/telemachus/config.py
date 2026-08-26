@@ -334,6 +334,7 @@ def _resolve_paths(config: TelemachusConfig) -> TelemachusConfig:
         governance=config.governance,
         communication=config.communication,
         memory=config.memory,
+        llm=config.llm,
     )
 
 

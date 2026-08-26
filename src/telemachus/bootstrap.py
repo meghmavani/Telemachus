@@ -125,18 +125,32 @@ class BootstrapProtocol:
         self,
         config: TelemachusConfig,
         memory_store: MemoryStore | None = None,
+        first_awakening: bool | None = None,
     ) -> None:
         """Initialize the bootstrap protocol.
 
         Args:
             config: The system configuration.
             memory_store: Optional pre-initialized memory store.
+            first_awakening: Whether this run is a first awakening. When
+                None (the default), falls back to
+                ``config.bootstrap.first_awakening`` — today's behavior,
+                unchanged for every caller that does not pass this
+                explicitly. A caller that knows more than the config file
+                can (for example, the Runtime knows whether this
+                installation has run before) may pass the fact directly.
+                This does not redefine what first awakening *means* —
+                that remains this class's five-phase protocol; it only
+                lets the fact of *whether* this is one be supplied by a
+                more authoritative source than a static config flag.
         """
         self._config = config
         self._memory_store = memory_store
         self._identity: Identity | None = None
         self._constitution: Constitution | None = None
-        self._first_awakening = config.bootstrap.first_awakening
+        self._first_awakening = (
+            config.bootstrap.first_awakening if first_awakening is None else first_awakening
+        )
 
     # ------------------------------------------------------------------
     # Main bootstrap entry point

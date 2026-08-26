@@ -102,6 +102,37 @@ class TestLoadConfig:
         with pytest.raises(dataclasses.FrozenInstanceError):
             test_config.identity.name = "Changed"  # type: ignore[misc]
 
+    def test_llm_section_survives_path_resolution(self, temp_dir: Path) -> None:
+        """A configured [llm] section must not be dropped by _resolve_paths().
+
+        Regression test for a bug where _resolve_paths() rebuilt
+        TelemachusConfig field-by-field and omitted `llm=`, silently
+        discarding every configured candidate after path resolution.
+        """
+        config_file = temp_dir / "llm_config.toml"
+        _write_config(
+            config_file,
+            "[llm]\n"
+            "enabled = true\n"
+            "timeout_sec = 30.0\n"
+            "[[llm.candidates.converse]]\n"
+            'name = "local"\n'
+            'provider = "ollama"\n'
+            'base_url = "http://localhost:11434"\n'
+            'model = "qwen3:8b"\n',
+        )
+
+        config = load_config_from_path(config_file)
+
+        assert config.llm.enabled is True
+        assert config.llm.timeout_sec == 30.0
+        assert list(config.llm.candidates.keys()) == ["converse"]
+        candidates = config.llm.candidates["converse"]
+        assert len(candidates) == 1
+        assert candidates[0].name == "local"
+        assert candidates[0].provider == "ollama"
+        assert candidates[0].model == "qwen3:8b"
+
 
 class TestConfigDefaults:
     """Tests for default configuration values."""
@@ -117,3 +148,12 @@ class TestConfigDefaults:
         assert test_config.governance is not None
         assert test_config.communication is not None
         assert test_config.memory is not None
+        assert test_config.llm is not None
+
+    def test_default_llm_config_is_disabled_with_no_candidates(
+        self, test_config: TelemachusConfig
+    ) -> None:
+        """Default [llm] behavior should remain unchanged: disabled, no candidates."""
+        assert test_config.llm.enabled is False
+        assert test_config.llm.timeout_sec == 45.0
+        assert test_config.llm.candidates == {}

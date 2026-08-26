@@ -17,6 +17,8 @@ import logging
 from telemachus.config import TelemachusConfig
 from telemachus.memory.store import MemoryStore
 from telemachus.pipeline import CognitivePipeline
+from telemachus.runtime.lifecycle import RuntimeLifecycle
+from telemachus.runtime.state_store import RuntimeStateStore
 
 logger = logging.getLogger("telemachus.wiring")
 
@@ -55,3 +57,29 @@ def build_pipeline(
     """
     store = memory_store if memory_store is not None else build_memory_store(config)
     return CognitivePipeline(memory_store=store)
+
+
+def build_runtime(config: TelemachusConfig) -> RuntimeLifecycle:
+    """Build a Runtime lifecycle ready to start.
+
+    This is the composition root's only construction path for the
+    Runtime: the state store it will connect to runtime.db, and the
+    factory it will call to obtain the connected Core memory store, are
+    both assembled here rather than inside ``RuntimeLifecycle`` itself —
+    consistent with ``build_memory_store`` and ``build_pipeline`` above,
+    and with the Runtime's role of coordinating Core components rather
+    than constructing them independently.
+
+    Args:
+        config: The system configuration.
+
+    Returns:
+        A RuntimeLifecycle ready for ``start()``. Neither runtime.db nor
+        telemachus.db is touched until then.
+    """
+    state_store = RuntimeStateStore(config.paths.data_dir / "runtime.db")
+    return RuntimeLifecycle(
+        config=config,
+        state_store=state_store,
+        memory_store_factory=lambda: build_memory_store(config),
+    )

@@ -20,7 +20,8 @@ from telemachus.core.types import CommunicationMode
 from telemachus.interaction.communication import CommunicationEngine
 from telemachus.logging_config import get_logger, setup_logging
 from telemachus.pipeline import CognitivePipeline
-from telemachus.wiring import build_pipeline
+from telemachus.runtime import PreviousTermination, RecoveryBriefing
+from telemachus.wiring import build_pipeline, build_runtime
 
 logger = get_logger("cli_chat")
 
@@ -42,6 +43,7 @@ class ChatSession:
         *,
         pipeline: CognitivePipeline | None = None,
         communication: CommunicationEngine | None = None,
+        recovery_briefing: RecoveryBriefing | None = None,
     ) -> None:
         """Initialize a chat session.
 
@@ -49,11 +51,16 @@ class ChatSession:
             config: Loaded Telemachus configuration.
             pipeline: Optional pre-configured CognitivePipeline.
             communication: Optional pre-configured CommunicationEngine.
+            recovery_briefing: The Runtime's RecoveryBriefing from startup,
+                if available. Displayed once before the first prompt, per
+                docs/lifecycle.md — chat is the "first natural interaction"
+                after an unclean previous session.
         """
         self._config = config
         self._console = Console()
         self._running = False
         self._session_id: str | None = None
+        self._recovery_briefing = recovery_briefing
 
         # Initialize components
         self._pipeline = pipeline or CognitivePipeline()
@@ -281,6 +288,30 @@ class ChatSession:
             )
         )
         self._console.print()
+        self._print_recovery_briefing()
+
+    def _print_recovery_briefing(self) -> None:
+        """Display the Runtime's recovery briefing, if there is one.
+
+        Shown once here, before the first prompt — this is the "first
+        natural interaction" docs/lifecycle.md asks for, and reports
+        facts only (no interpretation, which remains Core work).
+        """
+        briefing = self._recovery_briefing
+        if briefing is None or briefing.is_new_installation:
+            return
+
+        if briefing.previous_termination == PreviousTermination.UNCLEAN:
+            last_state = (
+                briefing.previous_session.last_state
+                if briefing.previous_session is not None
+                else "unknown"
+            )
+            self._console.print(
+                f"[yellow]Previous session did not shut down cleanly[/yellow] "
+                f"[dim](last recorded state: {last_state})[/dim]"
+            )
+            self._console.print()
 
     def _print_help(self) -> None:
         """Print the help text."""
@@ -367,11 +398,33 @@ def start_chat(
     config.paths.data_dir.mkdir(parents=True, exist_ok=True)
     config.paths.log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize pipeline with memory store if configured
-    pipeline = build_pipeline(config)
+    # Delegate to the Runtime for bootstrap, recovery/reconciliation, and
+    # the memory store's connection lifecycle — the same startup sequence
+    # `telemachus start` uses, so chat is just another front door onto the
+    # same persistent Runtime rather than a separate, unbootstrapped path.
+    runtime = build_runtime(config)
+    bootstrap_result = runtime.start()
 
-    # Create and run chat session
-    session = ChatSession(config, pipeline=pipeline)
-    session.run()
+    if not bootstrap_result.success:
+        console.print("[bold red]Bootstrap failed.[/bold red] Check logs for details.")
+        runtime.shutdown()
+        sys.exit(1)
 
-    log.info("Chat session ended")
+    if runtime.memory_store is None:  # pragma: no cover — set on every successful start()
+        console.print("[bold red]ERROR:[/bold red] Runtime did not provide a memory store.")
+        runtime.shutdown()
+        sys.exit(1)
+
+    pipeline = build_pipeline(config, memory_store=runtime.memory_store)
+
+    try:
+        session = ChatSession(
+            config, pipeline=pipeline, recovery_briefing=runtime.recovery_briefing
+        )
+        session.run()
+    finally:
+        # Always releases the memory store and closes the Runtime session
+        # cleanly, however the chat loop exited — /exit, EOF, or an
+        # uncaught exception in the loop above.
+        runtime.shutdown()
+        log.info("Chat session ended")

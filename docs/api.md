@@ -729,6 +729,7 @@ class BootstrapProtocol:
         self,
         config: TelemachusConfig,
         memory_store: MemoryStore | None = None,
+        first_awakening: bool | None = None,
     ) -> None
 
     def bootstrap(self) -> BootstrapResult
@@ -736,6 +737,8 @@ class BootstrapProtocol:
     def is_first_awakening(self) -> bool
     def get_first_awakening_questions(self) -> list[str]
 ```
+
+`first_awakening`: when `None` (the default), falls back to `config.bootstrap.first_awakening` — unchanged behavior for every caller that does not pass it explicitly. The Runtime passes this explicitly, computed as `is_new_installation and config.bootstrap.first_awakening`, so first awakening triggers on an installation's first run only, rather than on every start where the config flag is `true`. This does not redefine what first awakening *means* — the five-phase protocol above is unchanged — it only lets a more authoritative source than a static config flag supply the fact of *whether* this run is one. See [Runtime](#runtime) below.
 
 **`BootstrapResult`** (dataclass)
 ```python
@@ -766,6 +769,174 @@ class PhaseResult:
 **`BootstrapPhase`** (enum): `LOAD_CORE_DOCS`, `EVALUATE_STATE`, `LOAD_MEMORY`, `RECONNECT`, `RESUME`
 
 **`PhaseStatus`** (enum): `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `SKIPPED`
+
+---
+
+## Runtime
+
+### `telemachus.runtime` — Lifecycle and Session Continuity
+
+The Runtime coordinates process lifetime, lifecycle state, crash detection,
+recovery, reconciliation, signal handling, and release ordering around the
+Core. It owns none of the Core's responsibilities: reasoning, memory-domain
+semantics, governance, planning, and the five-phase bootstrap protocol
+above remain entirely the Core's (see `docs/runtime.md`, ADR-001).
+
+This milestone implements Runtime Lifecycle and Session Continuity only.
+The Event Loop, Observation system, scheduling, semantic readiness, and
+plugins are future milestones and are not present here.
+
+**`RuntimeLifecycle`** — orchestrates the Runtime's operational lifetime.
+```python
+class RuntimeLifecycle:
+    def __init__(
+        self,
+        config: TelemachusConfig,
+        state_store: RuntimeStateStore,
+        memory_store_factory: Callable[[], MemoryStore],
+        signal_handler: SignalHandler | None = None,
+        bootstrap_factory: Callable[[TelemachusConfig, MemoryStore, bool], BootstrapProtocol] | None = None,
+    ) -> None
+
+    def start(self) -> BootstrapResult
+    def wait_for_shutdown_request(self) -> None
+    def run_until_shutdown(self) -> None
+    def request_shutdown(self) -> None
+    def shutdown(self) -> None
+    def snapshot(self) -> LifecycleSnapshot
+
+    @property
+    def state(self) -> LifecycleState
+    @property
+    def running_mode(self) -> RunningMode
+    @property
+    def memory_store(self) -> MemoryStore | None
+    @property
+    def bootstrap_protocol(self) -> BootstrapProtocol | None
+    @property
+    def bootstrap_result(self) -> BootstrapResult | None
+    @property
+    def recovery_briefing(self) -> RecoveryBriefing | None
+```
+
+`start()` runs the full startup sequence through to `RUNNING`: installs
+signal handlers, opens `runtime.db`, determines whether this is a new
+installation, classifies how the previous session ended, opens a new
+session, connects the Core memory store, runs the Core's five-phase
+bootstrap protocol exactly once as an indivisible unit at the correct
+point (inside Recovery), reconciles, and reaches `RUNNING`. Returns the
+`BootstrapResult` unmodified — the Runtime never inspects its phase data,
+only `result.success`.
+
+`wait_for_shutdown_request()` blocks in `RUNNING` until a shutdown has
+been requested (by signal or `request_shutdown()`), without performing
+shutdown itself — this lets a caller react between the request arriving
+and shutdown running, e.g. to print a message. `run_until_shutdown()` is
+the convenience form that also calls `shutdown()`.
+
+`shutdown()` is idempotent and independently guards each resource release
+— closes the Core memory store, records whether that close actually
+succeeded as `clean_shutdown`, closes the Runtime state store, and
+restores signal handlers — so a failure in one step never prevents the
+others.
+
+**`RuntimeStateStore`** — SQLite-backed persistence over `runtime.db`, entirely separate from `telemachus.db`.
+```python
+class RuntimeStateStore:
+    SCHEMA_VERSION: int = 1
+
+    def __init__(self, db_path: str | Path) -> None
+    def connect(self) -> None
+    def disconnect(self) -> None
+    def initialize_schema(self) -> None
+
+    def read_installation(self) -> InstallationRecord | None
+    def create_installation_if_absent(self, instance_id: str) -> InstallationRecord
+
+    def get_most_recent_session(self) -> SessionRecord | None
+    def open_session(self, session_id: str, pid: int, initial_state: str) -> SessionRecord
+    def update_session_state(self, session_id: str, state: str) -> None
+    def close_session(self, session_id: str, *, clean_shutdown: bool) -> None
+```
+
+Crash detection derives entirely from the session record — no heartbeats,
+no timers. A session that never reaches `close_session()` leaves
+`ended_at IS NULL` and `clean_shutdown = 0`; the next `get_most_recent_session()`
+call sees exactly that. Installation metadata is written once by
+`create_installation_if_absent()` and never rewritten.
+
+**`SignalHandler`** — minimal, restorable, platform-aware signal handling.
+```python
+class SignalHandler:
+    shutdown_requested: threading.Event
+    received_signal: int | None
+
+    def available_signals(self) -> list[int]
+    def install(self) -> None
+    def restore(self) -> None
+    def request_shutdown(self) -> None
+```
+
+Installs handlers only for whichever of `SIGINT`/`SIGTERM`/`SIGBREAK`/`SIGHUP`
+the running platform actually defines (`SIGHUP` does not exist on Windows;
+`SIGBREAK` exists only there) — probed with `getattr`, never assumed. Each
+handler does the minimum legal work: record which signal arrived, set
+`shutdown_requested`, return. All real shutdown work happens later, on the
+main thread, once a caller observes the Event. `restore()` returns
+whichever handlers were active before `install()`, leaving no global
+state behind — safe to install and restore repeatedly within one process.
+
+**`LifecycleState`** (enum): `BOOTING`, `INSTALLING`, `RECOVERY`, `RECONCILIATION`, `RUNNING`, `SHUTTING_DOWN`, `FAILED`, `STOPPED`
+
+**`RunningMode`** (enum): `IDLE`, `ACTIVE` — `RUNNING`'s substate. Fixed at `IDLE` in this milestone; nothing yet drives it to `ACTIVE`, since that requires the Event Loop (a future milestone).
+
+**`PreviousTermination`** (enum): `NONE`, `CLEAN`, `UNCLEAN` — how the previous Runtime session ended, read from `runtime.db` alone.
+
+**`InvalidTransitionError`** — raised by an illegal lifecycle transition, e.g. `BOOTING -> RUNNING` (skips Recovery) or `RECOVERY -> RUNNING` (skips Reconciliation). Carries `from_state` and `to_state`. The full transition table lives in `telemachus.runtime.states`.
+
+**`InstallationRecord`** (frozen dataclass)
+```python
+@dataclass(frozen=True)
+class InstallationRecord:
+    instance_id: str
+    installed_at: float
+    schema_version: int
+```
+
+**`SessionRecord`** (frozen dataclass)
+```python
+@dataclass(frozen=True)
+class SessionRecord:
+    session_id: str
+    pid: int
+    started_at: float
+    ended_at: float | None
+    clean_shutdown: bool
+    last_state: str
+```
+
+**`RecoveryBriefing`** (frozen dataclass) — a plain, uninterpreted summary of what Recovery found. Generating prose from it is Core work and is out of scope here; the CLI decides whether and when to display it.
+```python
+@dataclass(frozen=True)
+class RecoveryBriefing:
+    previous_termination: PreviousTermination
+    previous_session: SessionRecord | None
+    offline_seconds: float | None
+    is_new_installation: bool
+```
+
+**`LifecycleSnapshot`** (frozen dataclass) — a read-only view for callers such as the CLI.
+```python
+@dataclass(frozen=True)
+class LifecycleSnapshot:
+    state: LifecycleState
+    session_id: str
+    instance_id: str
+```
+
+### `telemachus.wiring` — Composition Root Addition
+
+**`build_runtime(config: TelemachusConfig) -> RuntimeLifecycle`** — the only construction path for the Runtime. Assembles the `RuntimeStateStore` over `runtime.db` and a memory-store factory that delegates to `build_memory_store()`, so the Runtime never constructs Core components independently — it coordinates them.
 
 ---
 
