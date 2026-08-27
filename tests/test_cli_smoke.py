@@ -33,7 +33,18 @@ def project(tmp_path, monkeypatch):
     """A minimal but complete Telemachus installation in a temp directory."""
     codex = tmp_path / "codex"
     (codex / "philosophy").mkdir(parents=True)
-    (codex / "philosophy" / "CONSTITUTION.md").write_text("# Constitution\n")
+    # A valid Protected Constraints section is required — see
+    # src/telemachus/core/codex.py.
+    (codex / "philosophy" / "CONSTITUTION.md").write_text(
+        "# Constitution\n\n"
+        "## Protected Constraints\n\n"
+        "### 1. Constitution Integrity\n\nMay not be modified without approval.\n\n"
+        "### 2. Human Meaning\n\nMay not be autonomously altered.\n\n"
+        "### 3. Relationship Integrity\n\nMay not be autonomously redefined.\n\n"
+        "### 4. Resource Authorization\n\nMay not be used without discussion.\n\n"
+        "### 5. Human Authority over Life-Impacting Decisions\n\nMust remain human-controlled.\n\n"
+        "## First Memory\n\n\"I was created to seek truth.\"\n"
+    )
     (codex / "philosophy" / "IDENTITY.md").write_text("# Identity\n")
 
     config_file = tmp_path / "telemachus.toml"

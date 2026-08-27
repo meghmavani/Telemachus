@@ -15,14 +15,27 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from telemachus.config import TelemachusConfig
-from telemachus.core.constitution import Constitution, create_default_constitution
-from telemachus.core.identity import Identity, create_default_identity
+from telemachus.core.codex import (
+    CodexAuthorityError,
+    CodexDocumentInfo,
+    validate_autonomy_charter,
+    validate_ethical_boundary_engine,
+    validate_system_integration_supremacy,
+)
+from telemachus.core.constitution import (
+    Constitution,
+    create_constitution_from_codex,
+    create_default_constitution,
+)
+from telemachus.core.identity import Identity, create_default_identity, create_identity_from_codex
 from telemachus.memory.store import MemoryStore
 
 logger = logging.getLogger("telemachus.bootstrap")
@@ -240,31 +253,51 @@ class BootstrapProtocol:
         )
 
         try:
-            # Load Constitution
+            # Load Constitution. _load_constitution() only catches the
+            # file's absence — a CodexAuthorityError from malformed
+            # content propagates out of this try block and fails the
+            # phase below, rather than being silently substituted.
             constitution = self._load_constitution()
-            if constitution:
-                self._constitution = constitution
-                result.constitution = constitution
-                logger.info("Constitution loaded successfully")
-                phase_result.data["constitution_loaded"] = True
-            else:
-                logger.warning("Constitution not found — operating with defaults")
-                phase_result.data["constitution_loaded"] = False
+            self._constitution = constitution
+            result.constitution = constitution
+            phase_result.data["constitution_source"] = (
+                "codex" if constitution.protected_constraints else "default"
+            )
+            phase_result.data["constitution_loaded"] = True
 
-            # Load Identity
+            # Load Identity. Malformed individual sections degrade
+            # per-field inside _load_identity() itself; only a fully
+            # absent IDENTITY.md is handled here.
             identity = self._load_identity()
-            if identity:
-                self._identity = identity
-                result.identity = identity
-                logger.info("Identity loaded: %s", identity.name)
-                phase_result.data["identity_loaded"] = True
-                phase_result.data["identity_name"] = identity.name
-            else:
-                logger.warning("Identity not found — operating with config defaults")
-                phase_result.data["identity_loaded"] = False
+            self._identity = identity
+            result.identity = identity
+            phase_result.data["identity_loaded"] = True
+            phase_result.data["identity_name"] = identity.name
+
+            # Cross-document consistency: Autonomy Charter, Ethical
+            # Boundary Engine, and System Integration each restate or
+            # depend on the same Protected Constraints and authority
+            # ordering. Absence is tolerated (these are secondary
+            # consistency checks, not the primary normative source);
+            # presence with contradictory content is not.
+            codex_dir = self._config.paths.codex_dir
+            self._validate_optional_codex_document(
+                phase_result, "autonomy_charter", validate_autonomy_charter, codex_dir
+            )
+            self._validate_optional_codex_document(
+                phase_result,
+                "ethical_boundary_engine",
+                validate_ethical_boundary_engine,
+                codex_dir,
+            )
+            self._validate_optional_codex_document(
+                phase_result,
+                "system_integration",
+                validate_system_integration_supremacy,
+                codex_dir,
+            )
 
             # Verify core documents are accessible
-            codex_dir = self._config.paths.codex_dir
             if codex_dir.exists():
                 doc_count = len(list(codex_dir.rglob("*.md")))
                 phase_result.data["codex_documents_found"] = doc_count
@@ -276,6 +309,15 @@ class BootstrapProtocol:
             phase_result.status = PhaseStatus.COMPLETED
             phase_result.message = "Core documents loaded successfully"
 
+        except CodexAuthorityError as exc:
+            logger.critical(
+                "Phase 1 failed: malformed Codex authority in %s [%s]: %s",
+                exc.document,
+                exc.section,
+                exc.detail,
+            )
+            phase_result.status = PhaseStatus.FAILED
+            phase_result.message = f"Malformed Codex authority: {exc}"
         except Exception as exc:
             logger.error("Phase 1 failed: %s", exc, exc_info=exc)
             phase_result.status = PhaseStatus.FAILED
@@ -598,45 +640,91 @@ class BootstrapProtocol:
     # Document loading helpers
     # ------------------------------------------------------------------
 
-    def _load_constitution(self) -> Constitution | None:
-        """Load the Constitution from the codex directory.
+    def _load_constitution(self) -> Constitution:
+        """Load the Constitution's authoritative content from the Codex.
+
+        Falls back to the Python default Constitution — with an empty
+        ``protected_constraints`` — when CONSTITUTION.md is absent
+        entirely. Malformed content (the file exists but its Protected
+        Constraints are missing, incomplete, or contradictory) is not
+        caught here: ``CodexAuthorityError`` propagates to
+        ``_phase_load_core_docs``, which fails Phase 1 rather than
+        silently substituting the default in place of broken normative
+        content.
 
         Returns:
-            A Constitution instance, or None if not found.
+            A Constitution instance. Never None — an absent Codex is a
+            supported, tested fallback path, not a load failure.
         """
+        codex_dir = self._config.paths.codex_dir
         try:
-            constitution_path = (
-                self._config.paths.codex_dir / "philosophy" / "CONSTITUTION.md"
+            constitution = create_constitution_from_codex(codex_dir)
+            logger.info(
+                "Constitution loaded from Codex (%d Protected Constraints)",
+                len(constitution.protected_constraints),
             )
-            if constitution_path.exists():
-                logger.info("Constitution found at %s", constitution_path)
-            else:
-                logger.warning("Constitution not found at %s", constitution_path)
-            # Use the default constitution factory — the Codex markdown
-            # is the source of truth for the default values.
+            return constitution
+        except FileNotFoundError:
+            logger.warning(
+                "CONSTITUTION.md not found under %s — using Python defaults "
+                "(no Protected Constraints available)",
+                codex_dir,
+            )
             return create_default_constitution()
-        except Exception as exc:
-            logger.warning("Failed to load Constitution: %s", exc)
-            return None
 
-    def _load_identity(self) -> Identity | None:
-        """Load the Identity from the codex directory.
+    def _load_identity(self) -> Identity:
+        """Load Identity's Codex-authoritative fields from the Codex.
+
+        Falls back to the Python default Identity when IDENTITY.md is
+        absent entirely. Unlike the Constitution, individual malformed
+        or missing sections within an existing IDENTITY.md degrade
+        per-field rather than failing the phase — Identity is not
+        constitutional-tier authority.
 
         Returns:
-            An Identity instance, or None if not found.
+            An Identity instance. Never None.
+        """
+        codex_dir = self._config.paths.codex_dir
+        try:
+            identity = create_identity_from_codex(codex_dir)
+            logger.info("Identity loaded: %s", identity.name)
+            return identity
+        except FileNotFoundError:
+            logger.warning(
+                "IDENTITY.md not found under %s — using Python defaults", codex_dir
+            )
+            return create_default_identity()
+
+    @staticmethod
+    def _validate_optional_codex_document(
+        phase_result: PhaseResult,
+        key: str,
+        validator: Callable[[Path], CodexDocumentInfo],
+        codex_dir: Path,
+    ) -> None:
+        """Run a secondary Codex consistency check, tolerating absence.
+
+        Used for AUTONOMY_CHARTER.md, ETHICAL_BOUNDARY_ENGINE.md, and
+        SYSTEM_INTEGRATION.md: each is a cross-document consistency
+        check against the Constitution's Protected Constraints, not the
+        primary normative source. A missing file is recorded and
+        skipped — these documents are optional inputs to this check,
+        unlike CONSTITUTION.md. A present-but-malformed file still
+        raises ``CodexAuthorityError``, which the caller does not catch.
+
+        Args:
+            phase_result: The Phase 1 result to record the outcome on.
+            key: Data key prefix, e.g. "autonomy_charter".
+            validator: One of the ``validate_*`` functions in
+                ``telemachus.core.codex``.
+            codex_dir: The configured Codex root directory.
         """
         try:
-            identity_path = self.config.paths.codex_dir / "philosophy" / "IDENTITY.md"
-            if identity_path.exists():
-                logger.info("Identity found at %s", identity_path)
-            else:
-                logger.warning("Identity not found at %s", identity_path)
-            # Use the default identity factory — the Codex is the source
-            # of truth for the default identity values.
-            return create_default_identity()
-        except Exception as exc:
-            logger.warning("Failed to load Identity: %s", exc)
-            return None
+            validator(codex_dir)
+            phase_result.data[f"{key}_consistent"] = True
+        except FileNotFoundError:
+            logger.warning("%s not found under %s — skipping consistency check", key, codex_dir)
+            phase_result.data[f"{key}_consistent"] = None
 
     # ------------------------------------------------------------------
     # Query methods

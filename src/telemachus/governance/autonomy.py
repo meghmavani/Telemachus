@@ -19,6 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from telemachus.core.constitution import Constitution
 from telemachus.core.types import AutonomyDecision, AutonomyLevel, RiskLevel
 
 logger = logging.getLogger("telemachus.governance.autonomy")
@@ -143,8 +144,18 @@ class AutonomyCharter:
     # Constructor
     # ------------------------------------------------------------------
 
-    def __init__(self) -> None:
-        """Initialize the autonomy charter with default domain trust levels."""
+    def __init__(self, constitution: Constitution | None = None) -> None:
+        """Initialize the autonomy charter with default domain trust levels.
+
+        Args:
+            constitution: The authoritative Constitution loaded by
+                Bootstrap, if available. Stored for future consumption —
+                this milestone does not change ``check_permission`` or
+                any other detection logic based on its presence. ``None``
+                (the default) preserves every existing call site's
+                behavior unchanged.
+        """
+        self.constitution = constitution
         self._domain_trust: dict[str, _DomainTrust] = {}
         self._initialize_domains()
         logger.info(

@@ -20,6 +20,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from telemachus.core.constitution import Constitution
 from telemachus.core.types import EthicalAssessment, EthicalVerdict, MemoryDomain
 
 logger = logging.getLogger("telemachus.governance.ethics")
@@ -142,6 +143,19 @@ class EthicalBoundaryEngine:
         )
         print(assessment.verdict)  # EthicalVerdict.BLOCKED
     """
+
+    def __init__(self, constitution: Constitution | None = None) -> None:
+        """Initialize the engine.
+
+        Args:
+            constitution: The authoritative Constitution loaded by
+                Bootstrap, if available. Stored for future consumption —
+                this milestone does not change ``_check_sacred_constraints``
+                or any other detection logic based on its presence.
+                ``None`` (the default) preserves every existing call
+                site's behavior unchanged.
+        """
+        self.constitution = constitution
 
     # ------------------------------------------------------------------
     # Public API

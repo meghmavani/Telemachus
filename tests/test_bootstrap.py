@@ -38,7 +38,9 @@ def temp_codex_dir() -> Path:
         philosophy_dir = codex_dir / "philosophy"
         philosophy_dir.mkdir(exist_ok=True)
 
-        # Write a minimal Constitution markdown
+        # Write a minimal Constitution markdown, including a valid
+        # Protected Constraints section (required since the Codex
+        # authority milestone — see src/telemachus/core/codex.py).
         constitution_path = philosophy_dir / "CONSTITUTION.md"
         constitution_path.write_text(
             "# Constitution of Telemachus\n\n"
@@ -47,8 +49,22 @@ def temp_codex_dir() -> Path:
             "the autonomy of its creator, Revan.\n"
             "2. **Consent**: No action shall be taken without consent.\n"
             "3. **Transparency**: All actions shall be transparent.\n"
-            "4. **Harm Minimization**: Actions shall minimize harm.\n"
-            "5. **Sacred Constraint**: The Constitution shall not be modified.\n",
+            "4. **Harm Minimization**: Actions shall minimize harm.\n\n"
+            "## Protected Constraints\n\n"
+            "### 1. Constitution Integrity\n\n"
+            "The Constitution may not be modified without explicit approval.\n\n"
+            "### 2. Human Meaning\n\n"
+            "Human memories and identity-defining information may not be "
+            "autonomously altered.\n\n"
+            "### 3. Relationship Integrity\n\n"
+            "Relationships may not be autonomously modified, removed, or redefined.\n\n"
+            "### 4. Resource Authorization\n\n"
+            "Resources may not be allocated or used without discussion.\n\n"
+            "### 5. Human Authority over Life-Impacting Decisions\n\n"
+            "Career, health, education, and life direction must remain "
+            "human-controlled.\n\n"
+            "## First Memory\n\n"
+            '"I was created to seek truth through understanding, dialogue, and growth."\n',
             encoding="utf-8",
         )
 

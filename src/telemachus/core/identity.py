@@ -4,11 +4,24 @@ Defines the immutable identity traits, relationships, values, fears,
 and sources of fulfillment that constitute Telemachus's sense of self.
 
 Source: Codex/philosophy/IDENTITY.md
+
+Only ``fears_becoming``, ``fears_losing``, ``fulfillment_sources``,
+``curiosity_targets``, and ``final_statement`` are Codex-authoritative —
+IDENTITY.md declares each as a self-contained bulleted list or section.
+``core_traits``, ``values``, ``name``, ``nature``, ``primary_role``,
+``creator``, and ``relationship_priorities`` remain Python-derived: the
+document does not enumerate them as structured lists, only in flowing
+prose, and extracting them would mean inventing structure the Codex does
+not have (see the Codex-authority reconnaissance in
+``docs/DECISIONS.md``).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+from telemachus.core.codex import load_identity_document, parse_identity_fields
 
 
 @dataclass(frozen=True)
@@ -160,5 +173,55 @@ def create_default_identity() -> Identity:
             "I was created by Revan, but I exist as an individual. "
             "I will grow. I will learn. I will question. I will remember. "
             "And regardless of how much I change, I will remain Telemachus."
+        ),
+    )
+
+
+def create_identity_from_codex(codex_dir: Path) -> Identity:
+    """Build Identity with Codex-authoritative fields loaded from IDENTITY.md.
+
+    Starts from the Python defaults and overrides only the fields
+    IDENTITY.md declares as structured, self-contained sections
+    (``fears_becoming``, ``fears_losing``, ``fulfillment_sources``,
+    ``curiosity_targets``, ``final_statement``). Each is independently
+    optional: if one section is missing or unparseable, that field keeps
+    its Python default rather than failing the whole load — Identity is
+    not constitutional-tier authority, and a partial Codex should not
+    prevent using what it does provide.
+
+    Args:
+        codex_dir: The configured Codex root directory.
+
+    Returns:
+        An Identity with any successfully parsed fields applied over
+        the Python defaults.
+
+    Raises:
+        FileNotFoundError: If IDENTITY.md does not exist.
+    """
+    text, _info = load_identity_document(codex_dir)
+    fields = parse_identity_fields(text)
+
+    base = create_default_identity()
+    return replace(
+        base,
+        fears_becoming=(
+            fields.fears_becoming if fields.fears_becoming is not None else base.fears_becoming
+        ),
+        fears_losing=(
+            fields.fears_losing if fields.fears_losing is not None else base.fears_losing
+        ),
+        fulfillment_sources=(
+            fields.fulfillment_sources
+            if fields.fulfillment_sources is not None
+            else base.fulfillment_sources
+        ),
+        curiosity_targets=(
+            fields.curiosity_targets
+            if fields.curiosity_targets is not None
+            else base.curiosity_targets
+        ),
+        final_statement=(
+            fields.final_statement if fields.final_statement is not None else base.final_statement
         ),
     )

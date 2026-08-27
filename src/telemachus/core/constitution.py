@@ -1,6 +1,6 @@
 """Constitution of Telemachus — immutable governing principles.
 
-The Constitution defines the core principles, sacred constraints, and
+The Constitution defines the core principles, protected constraints, and
 authority hierarchy that govern all Telemachus behavior. It is loaded
 as a frozen dataclass and cannot be mutated at runtime.
 
@@ -9,8 +9,18 @@ Source: codex/philosophy/CONSTITUTION.md
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import ClassVar
+
+from telemachus.core.codex import (
+    CONSTITUTION_RELATIVE_PATH,
+    ProtectedConstraint,
+    ProtectedConstraintDefinition,
+    load_constitution_document,
+    parse_first_memory,
+    parse_protected_constraints,
+)
 
 
 @dataclass(frozen=True)
@@ -26,22 +36,38 @@ class CorePrinciple:
 class Constitution:
     """The immutable Constitution of Telemachus.
 
-    Defines the core principles, sacred constraints, and authority
+    Defines the core principles, Protected Constraints, and authority
     hierarchy that govern all behavior. This is the highest authority
     in the Telemachus system — no module, pipeline stage, or decision
     may violate these principles.
 
+    Core Principles and Protected Constraints are different categories
+    (codex/philosophy/CONSTITUTION.md, "## Protected Constraints"): a
+    principle guides judgement and admits interpretation in context; a
+    Protected Constraint is categorical and does not weigh against other
+    considerations. ``sacred_constraints``/``CorePrinciple.is_sacred``
+    predate that distinction and have no basis in the Codex — they are
+    retained for compatibility but carry no constitutional authority.
+    ``protected_constraints`` is the authoritative set.
+
     Attributes:
         principles: All constitutional principles in priority order.
-        sacred_constraints: Principles that can never be violated.
+        sacred_constraints: Legacy, non-authoritative. Retained for
+            compatibility; carries no basis in the Codex.
         authority_chain: The authority hierarchy for resolving conflicts.
         first_memory: The founding memory statement.
+        protected_constraints: The five canonical Protected Constraints,
+            parsed from the Codex. Empty when no Codex document was
+            available to load them from — see ``create_default_constitution()``.
     """
 
     principles: tuple[CorePrinciple, ...]
     sacred_constraints: tuple[str, ...]
     authority_chain: tuple[str, ...]
     first_memory: str
+    protected_constraints: tuple[ProtectedConstraintDefinition, ...] = field(
+        default_factory=tuple
+    )
 
     # Class-level constants for the authority chain
     AUTHORITY_EVIDENCE: ClassVar[str] = "evidence"
@@ -66,6 +92,10 @@ class Constitution:
     def is_sacred(self, principle_name: str) -> bool:
         """Check if a principle is sacred (cannot be violated).
 
+        Legacy method — ``sacred_constraints`` has no basis in the
+        Codex. Use ``get_protected_constraint()`` for authoritative
+        constitutional protections.
+
         Args:
             principle_name: The name of the principle to check.
 
@@ -73,6 +103,24 @@ class Constitution:
             True if the principle is sacred.
         """
         return principle_name in self.sacred_constraints
+
+    def get_protected_constraint(
+        self, constraint: ProtectedConstraint
+    ) -> ProtectedConstraintDefinition | None:
+        """Retrieve one Protected Constraint's authoritative definition.
+
+        Args:
+            constraint: The stable identifier to look up.
+
+        Returns:
+            The ProtectedConstraintDefinition, or None if this
+            Constitution was not loaded from the Codex (see
+            ``protected_constraints``).
+        """
+        for pc in self.protected_constraints:
+            if pc.constraint == constraint:
+                return pc
+        return None
 
     def validate_action(self, action_description: str) -> tuple[bool, list[str]]:
         """Check if an action would violate any sacred constraints.
@@ -217,5 +265,40 @@ def create_default_constitution() -> Constitution:
         principles=tuple(principles),
         sacred_constraints=sacred,
         authority_chain=authority_chain,
+        first_memory=first_memory,
+        protected_constraints=(),
+    )
+
+
+def create_constitution_from_codex(codex_dir: Path) -> Constitution:
+    """Build the Constitution with authoritative content loaded from the Codex.
+
+    Core Principles remain the existing Python factory's list — parsing
+    them from prose is out of scope for this milestone (see
+    ``docs/DECISIONS.md`` for the Codex-authority reconnaissance this
+    follows). ``protected_constraints`` and ``first_memory`` are
+    authoritative, parsed directly from CONSTITUTION.md.
+
+    Args:
+        codex_dir: The configured Codex root directory.
+
+    Returns:
+        A Constitution whose ``protected_constraints`` and
+        ``first_memory`` come from the Codex.
+
+    Raises:
+        FileNotFoundError: If CONSTITUTION.md does not exist.
+        CodexAuthorityError: If it exists but its Protected Constraints
+            section is missing, incomplete, contradictory, or contains
+            an unrecognized entry.
+    """
+    text, _info = load_constitution_document(codex_dir)
+    protected_constraints = parse_protected_constraints(text, document=CONSTITUTION_RELATIVE_PATH)
+    first_memory = parse_first_memory(text, document=CONSTITUTION_RELATIVE_PATH)
+
+    base = create_default_constitution()
+    return replace(
+        base,
+        protected_constraints=protected_constraints,
         first_memory=first_memory,
     )
