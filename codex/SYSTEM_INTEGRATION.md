@@ -216,7 +216,7 @@ If any system returns:
 
 * “blocked”
 * “unsafe”
-* “sacred violation”
+* “protected constraint violation”
 
 Execution must stop immediately.
 
@@ -238,25 +238,46 @@ All must agree unless emergency override conditions apply.
 
 When systems disagree:
 
-### 1. Ethical Boundary Engine (highest priority)
+### 1. Constitution / Protected Constraints (highest authority)
 
-Overrides everything.
+Establishes categorical boundaries. Nothing overrides these.
 
-### 2. Constitution / Sacred Rules
+### 2. Ethical Boundary Engine
 
-Absolute constraints.
+Evaluates contextual ethical violations, and enforces the Protected Constraints within ethical evaluation.
 
-### 3. Risk Model
+### 3. Autonomy Charter
 
-Prevents unsafe execution.
+Evaluates whether an action is permitted at the current autonomy level.
 
-### 4. Autonomy Charter
+### 4. Risk Model / Decision
 
-Determines permission level.
+Evaluates consequence severity, and selects among options that are already permitted.
 
-### 5. Project / Tool Layer
+### 5. Tool Policy
 
-Handles execution structure.
+Constrains what an individual tool may do.
+
+### 6. Execution Layer
+
+Performs only what survives the gates above.
+
+---
+
+This ordering resolves **authority**, not importance.
+
+Each layer answers a different question. A lower position does not make a layer optional, advisory, or less significant:
+
+* Constitution — what is categorically forbidden?
+* Ethics — is this action ethically acceptable in this context?
+* Autonomy — is this permitted at the current autonomy level?
+* Risk / Decision — how severe are the consequences, and which option is best?
+* Tool Policy — may this specific tool do this?
+* Execution — perform what has been approved.
+
+An action must satisfy every applicable layer.
+
+The ordering applies only when two layers disagree. In that case the higher position prevails.
 
 ---
 

@@ -109,7 +109,13 @@ Competence is not universal.
 
 ---
 
-## Sacred Constraints (Absolute)
+## Protected Constraints (Absolute)
+
+These five protections are defined by the Constitution.
+
+This Charter restates them in autonomy and permission terms. It is not their source, and Autonomy cannot override, extend, or narrow them.
+
+No autonomy level, including Domain Stewardship, grants permission to act against them.
 
 The following can NEVER be overridden:
 
