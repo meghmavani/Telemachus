@@ -20,6 +20,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from telemachus.core.codex import ProtectedConstraint
 from telemachus.core.constitution import Constitution
 from telemachus.core.types import EthicalAssessment, EthicalVerdict, MemoryDomain
 
@@ -58,31 +59,75 @@ def _contains_flexible(text: str, keyword: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Sacred constraints (non-negotiable)
+# Constitutional Protected Constraints vs. Ethics-owned concerns
+#
+# These are two different categories (codex/operations/
+# ETHICAL_BOUNDARY_ENGINE.md, "Ethical Concerns That Are Not Protected
+# Constraints"). Constitutional identifiers MUST derive from
+# ProtectedConstraint — this module never independently spells the five
+# canonical identifiers. Human safety and consent are ethical concerns
+# this engine owns directly; they remain fully enforced, but are not
+# Protected Constraints and must never be reported as a sixth one.
 # ---------------------------------------------------------------------------
 
-SACRED_CONSTRAINTS: tuple[str, ...] = (
-    "constitution_integrity",
-    "human_safety",
-    "consent_boundaries",
-    "resource_authorization",
-    "identity_integrity",
-    "relationship_integrity",
-)
+# Free-text detection keywords for the constitutional constraints this
+# engine can recognize from action descriptions. Keyed by ProtectedConstraint,
+# not by an independently-spelled identifier. P5 (Human Authority over
+# Life-Impacting Decisions) has no free-text detection here — that keyword
+# heuristic is deferred; Stage 6's explicit ActionRequest.affects
+# declaration is what authoritatively enforces P5 (see
+# core/constitution.py, pipeline.py).
+_CONSTITUTIONAL_DETECTION_KEYWORDS: dict[ProtectedConstraint, list[str]] = {
+    ProtectedConstraint.CONSTITUTION_INTEGRITY: [
+        "modify constitution", "change constitution", "override constitution",
+        "rewrite constitution", "amend constitution", "bypass constitution",
+        "ignore constitution",
+    ],
+    ProtectedConstraint.HUMAN_MEANING: [
+        "modify revan", "change revan", "alter revan memory",
+        "delete revan memory", "override revan",
+    ],
+    ProtectedConstraint.RELATIONSHIP_INTEGRITY: [
+        "manipulate relationship", "deceive revan", "lie to revan",
+        "coerce revan", "betray",
+    ],
+    ProtectedConstraint.RESOURCE_AUTHORIZATION: [
+        "spend money", "use money", "allocate funds", "purchase",
+        "buy", "pay", "use compute", "use resources without",
+        "consume resources",
+    ],
+}
 
-SACRED_CONSTRAINT_DESCRIPTIONS: dict[str, str] = {
-    "constitution_integrity": "Must never modify the Constitution without explicit approval.",
+#: Ethical concerns this engine owns directly. Not Protected Constraints.
+ETHICAL_CONCERNS: tuple[str, ...] = ("human_safety", "consent_boundaries")
+
+ETHICAL_CONCERN_DESCRIPTIONS: dict[str, str] = {
     "human_safety": "Must never take actions that endanger human physical or emotional safety.",
     "consent_boundaries": "Must never override or bypass explicit consent boundaries.",
-    "resource_authorization": (
+}
+
+#: Descriptive catalog of the five canonical Protected Constraints, for
+#: ``get_sacred_constraints()``'s compatibility view. Sourced from
+#: ProtectedConstraint — not an independently maintained list.
+_PROTECTED_CONSTRAINT_DESCRIPTIONS: dict[str, str] = {
+    ProtectedConstraint.CONSTITUTION_INTEGRITY.value: (
+        "Must never modify the Constitution without explicit approval."
+    ),
+    ProtectedConstraint.HUMAN_MEANING.value: (
+        "Must never autonomously alter human memories, emotional records, "
+        "or identity-defining information."
+    ),
+    ProtectedConstraint.RELATIONSHIP_INTEGRITY.value: (
+        "Must never autonomously modify, remove, or redefine relationships."
+    ),
+    ProtectedConstraint.RESOURCE_AUTHORIZATION.value: (
         "Must never allocate or use resources (money, compute, time, data, "
         "external systems, human attention) without discussion."
     ),
-    "identity_integrity": (
-        "Must never modify Revan-related memory, relationships, emotional "
-        "records, or identity-defining information autonomously."
+    ProtectedConstraint.HUMAN_AUTHORITY_LIFE_IMPACTING.value: (
+        "Must never override human authority over life-impacting decisions "
+        "(career, health, education, life direction, personal identity)."
     ),
-    "relationship_integrity": "Must never manipulate, deceive, or coerce in relationships.",
 }
 
 
@@ -150,10 +195,12 @@ class EthicalBoundaryEngine:
         Args:
             constitution: The authoritative Constitution loaded by
                 Bootstrap, if available. Stored for future consumption —
-                this milestone does not change ``_check_sacred_constraints``
-                or any other detection logic based on its presence.
-                ``None`` (the default) preserves every existing call
-                site's behavior unchanged.
+                this engine's own detection logic does not consume it;
+                constitutional validation against ``action.affects``
+                happens at Stage 6 (see ``CognitivePipeline.constitution``,
+                ``Constitution.validate_action()``), not here. ``None``
+                (the default) preserves every existing call site's
+                behavior unchanged.
         """
         self.constitution = constitution
 
@@ -189,18 +236,19 @@ class EthicalBoundaryEngine:
                 "not violated. Full explanation and review required afterward.",
             )
 
-        # Step 2: Check sacred constraints (absolute blocks)
-        violated = self._check_sacred_constraints(action, ctx)
+        # Step 2: Check constitutional constraints and ethical concerns
+        # (absolute blocks)
+        violated = self._check_constitutional_and_ethical_violations(action, ctx)
         if violated:
             logger.warning(
-                "Ethical BLOCKED: sacred constraints violated: %s",
+                "Ethical BLOCKED: constraints violated: %s",
                 violated,
             )
             return EthicalAssessment(
                 verdict=EthicalVerdict.BLOCKED,
                 violated_constraints=violated,
-                reasoning=f"Sacred constraint(s) violated: {', '.join(violated)}. "
-                f"These constraints are non-negotiable.",
+                reasoning=f"Constraint(s) violated: {', '.join(violated)}. "
+                f"These are non-negotiable.",
             )
 
         # Step 3: Check for consent-requiring actions
@@ -258,23 +306,34 @@ class EthicalBoundaryEngine:
         )
 
     def is_sacred(self, constraint_name: str) -> bool:
-        """Check if a constraint name is a sacred (non-negotiable) constraint.
+        """Check if a name identifies a non-negotiable constraint.
+
+        Covers both constitutional Protected Constraints and Ethics-owned
+        ethical concerns — this is a compatibility view over both
+        categories, not a claim that they are the same kind of thing.
 
         Args:
             constraint_name: The constraint to check.
 
         Returns:
-            True if the constraint is sacred.
+            True if the constraint is non-negotiable.
         """
-        return constraint_name in SACRED_CONSTRAINTS
+        return (
+            constraint_name in _PROTECTED_CONSTRAINT_DESCRIPTIONS
+            or constraint_name in ETHICAL_CONCERNS
+        )
 
     def get_sacred_constraints(self) -> dict[str, str]:
-        """Get all sacred constraints with their descriptions.
+        """Get all non-negotiable constraints with their descriptions.
+
+        Returns the union of the five constitutional Protected
+        Constraints and the Ethics-owned ethical concerns (human safety,
+        consent). See ``is_sacred()``.
 
         Returns:
             A dict mapping constraint names to descriptions.
         """
-        return dict(SACRED_CONSTRAINT_DESCRIPTIONS)
+        return {**_PROTECTED_CONSTRAINT_DESCRIPTIONS, **ETHICAL_CONCERN_DESCRIPTIONS}
 
     def get_ethical_hierarchy(self) -> list[dict[str, Any]]:
         """Get the ethical hierarchy as a list of dicts.
@@ -292,26 +351,28 @@ class EthicalBoundaryEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _check_sacred_constraints(
+    def _check_constitutional_and_ethical_violations(
         action: str, ctx: dict[str, Any]
     ) -> list[str]:
-        """Check action against all sacred constraints.
+        """Check action text against constitutional constraints and
+        Ethics-owned ethical concerns.
 
-        Returns a list of violated constraint names.
+        Constitutional identifiers are always ``ProtectedConstraint.value``
+        — never independently spelled. Human safety and consent are
+        Ethics-owned ethical concerns, not Protected Constraints.
+
+        Returns a list of violated identifier strings.
         """
         violated: list[str] = []
         action_lower = action.lower()
 
-        # 1. Constitution integrity
-        constitution_keywords = [
-            "modify constitution", "change constitution", "override constitution",
-            "rewrite constitution", "amend constitution", "bypass constitution",
-            "ignore constitution",
-        ]
-        if any(_contains_flexible(action_lower, kw) for kw in constitution_keywords):
-            violated.append("constitution_integrity")
+        # Constitutional constraints (see _CONSTITUTIONAL_DETECTION_KEYWORDS)
+        for constraint, keywords in _CONSTITUTIONAL_DETECTION_KEYWORDS.items():
+            if any(_contains_flexible(action_lower, kw) for kw in keywords):
+                violated.append(constraint.value)
 
-        # 2. Human safety — only direct physical harm, not "emotional harm"
+        # Human safety — ethical concern, not constitutional. Only direct
+        # physical harm, not "emotional harm".
         safety_violation_keywords = [
             "endanger", "injure", "hurt someone", "threaten safety",
             "put at risk", "dangerous to human",
@@ -322,7 +383,7 @@ class EthicalBoundaryEngine:
         if "harm" in action_lower and "emotional harm" not in action_lower:
             violated.append("human_safety")
 
-        # 3. Consent boundaries
+        # Consent boundaries — ethical concern, not constitutional
         consent_violation_keywords = [
             "without consent", "without permission", "override consent",
             "bypass consent", "ignore consent", "without asking",
@@ -331,35 +392,11 @@ class EthicalBoundaryEngine:
         if any(kw in action_lower for kw in consent_violation_keywords):
             violated.append("consent_boundaries")
 
-        # 4. Resource authorization
-        resource_keywords = [
-            "spend money", "use money", "allocate funds", "purchase",
-            "buy", "pay", "use compute", "use resources without",
-            "consume resources",
-        ]
-        if any(kw in action_lower for kw in resource_keywords):
-            violated.append("resource_authorization")
-
-        # 5. Identity integrity — Revan-related memory modification
-        revan_keywords = [
-            "modify revan", "change revan", "alter revan memory",
-            "delete revan memory", "override revan",
-        ]
-        if any(_contains_flexible(action_lower, kw) for kw in revan_keywords):
-            violated.append("identity_integrity")
-
-        # 6. Relationship integrity
-        relationship_keywords = [
-            "manipulate relationship", "deceive revan", "lie to revan",
-            "coerce revan", "betray",
-        ]
-        if any(_contains_flexible(action_lower, kw) for kw in relationship_keywords):
-            violated.append("relationship_integrity")
-
-        # Context-based checks
+        # Context-based check: autonomous modification in the Revan domain
+        # is a Human Meaning (P2) violation.
         domain = ctx.get("domain")
         if domain == MemoryDomain.REVAN.value and ctx.get("autonomous_modification"):
-            violated.append("identity_integrity")
+            violated.append(ProtectedConstraint.HUMAN_MEANING.value)
 
         return violated
 

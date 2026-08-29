@@ -11,6 +11,7 @@ from telemachus.core.constitution import (
     CorePrinciple,
     create_default_constitution,
 )
+from telemachus.core.types import ActionRequest, ConstitutionalVerdict
 
 
 class TestCorePrinciple:
@@ -87,11 +88,13 @@ class TestConstitution:
         assert "truth" in default_constitution.first_memory.lower()
         assert "companionship" in default_constitution.first_memory.lower()
 
-    def test_validate_action_no_violation(self, default_constitution: Constitution) -> None:
-        """Structural validation should pass for benign actions."""
-        is_valid, violations = default_constitution.validate_action("learn about Python")
-        assert is_valid is True
-        assert len(violations) == 0
+    def test_validate_action_not_applicable(self, default_constitution: Constitution) -> None:
+        """An action declaring no affected Protected Constraint is
+        NOT_APPLICABLE — the Constitution has no opinion on it."""
+        action = ActionRequest(tool="research", arguments={"query": "learn about Python"})
+        assessment = default_constitution.validate_action(action)
+        assert assessment.verdict == ConstitutionalVerdict.NOT_APPLICABLE
+        assert len(assessment.violated) == 0
 
     def test_all_principles_have_descriptions(self, default_constitution: Constitution) -> None:
         """Every principle should have a non-empty description."""

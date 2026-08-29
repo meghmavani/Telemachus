@@ -78,3 +78,34 @@ def test_cli_layer_is_allowed_to_import_runtime() -> None:
 
     assert _RUNTIME_IMPORT_RE.search(main_source)
     assert _RUNTIME_IMPORT_RE.search(cli_chat_source)
+
+
+_CODEX_IMPORT_RE = re.compile(
+    r"^\s*(from\s+telemachus\.core\.codex\b|import\s+telemachus\.core\.codex\b)",
+    re.MULTILINE,
+)
+_CONSTITUTION_REFERENCE_RE = re.compile(r"\bConstitution\b|\bProtectedConstraint\b")
+
+
+def test_runtime_does_not_import_codex_or_constitution() -> None:
+    """Runtime transports the Constitution BootstrapResult carries — it
+    must never parse Codex documents or interpret constitutional policy
+    itself (docs/runtime.md; ADR-001). This is stricter than the general
+    Core/Runtime import-direction check above: Runtime is allowed to
+    depend on Core in general, but this specific dependency (Codex
+    parsing, the Constitution type) must not appear in runtime/ at all.
+    """
+    runtime_root = SRC_ROOT / "runtime"
+    files = sorted(runtime_root.rglob("*.py"))
+    assert files, "expected to find .py files under runtime/"
+
+    offenders = []
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        if _CODEX_IMPORT_RE.search(text) or _CONSTITUTION_REFERENCE_RE.search(text):
+            offenders.append(str(path.relative_to(SRC_ROOT)))
+
+    assert not offenders, (
+        f"runtime/ must not import telemachus.core.codex or reference "
+        f"Constitution/ProtectedConstraint: {offenders}"
+    )

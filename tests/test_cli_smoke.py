@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 
 import telemachus.main as main_module
 from telemachus.config import load_config_from_path
+from telemachus.core.constitution import create_constitution_from_codex
 from telemachus.main import app
 from telemachus.runtime.states import LifecycleState
 from telemachus.wiring import build_memory_store, build_pipeline, build_runtime
@@ -128,7 +129,8 @@ def test_pipeline_processes_input_and_persists_it(project):
     config.paths.data_dir.mkdir(parents=True, exist_ok=True)
     store = build_memory_store(config)
     try:
-        pipeline = build_pipeline(config, memory_store=store)
+        constitution = create_constitution_from_codex(config.paths.codex_dir)
+        pipeline = build_pipeline(config, memory_store=store, constitution=constitution)
         result = pipeline.process("summarise my open projects", session_id="test")
         assert result.response
         assert store.get_stats()["total_entries"] > 0

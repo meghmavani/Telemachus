@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 
 from telemachus.config import TelemachusConfig
+from telemachus.core.constitution import Constitution
 from telemachus.memory.store import MemoryStore
 from telemachus.pipeline import CognitivePipeline
 from telemachus.runtime.lifecycle import RuntimeLifecycle
@@ -65,21 +66,33 @@ def build_pipeline(
     config: TelemachusConfig,
     memory_store: MemoryStore | None = None,
     tool_registry: ToolRegistry | None = None,
+    *,
+    constitution: Constitution,
 ) -> CognitivePipeline:
     """Build a cognitive pipeline backed by the configured memory store.
+
+    ``constitution`` is required and keyword-only, with no default and
+    no fallback to ``create_default_constitution()`` here: the
+    composition root is the one place production code assembles the
+    pipeline, so this is what makes an accidentally-Python-default
+    Constitution unreachable in production. Callers must supply the
+    Codex-derived Constitution from Bootstrap
+    (``BootstrapResult.constitution`` / ``RuntimeLifecycle.bootstrap_result``).
 
     Args:
         config: The system configuration.
         memory_store: An already-connected store. Built from config if None.
         tool_registry: The registry backing Stage 6 execution. Built with
             the built-in tools if None.
+        constitution: The authoritative Constitution for the Stage 6
+            constitutional gate. Required.
 
     Returns:
         A CognitivePipeline ready to process input.
     """
     store = memory_store if memory_store is not None else build_memory_store(config)
     registry = tool_registry if tool_registry is not None else build_tool_registry()
-    return CognitivePipeline(memory_store=store, tool_registry=registry)
+    return CognitivePipeline(memory_store=store, tool_registry=registry, constitution=constitution)
 
 
 def build_runtime(config: TelemachusConfig) -> RuntimeLifecycle:

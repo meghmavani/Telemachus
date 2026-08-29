@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any
 
+from telemachus.core.codex import ProtectedConstraint
+
 
 class RiskLevel(Enum):
     """Risk classification for actions."""
@@ -193,11 +195,65 @@ class ActionRequest:
         arguments: Keyword arguments passed to the tool's execute/validate.
         description: Optional human-readable description of the action,
             for logging and trace readability.
+        affects: Which constitutional Protected Constraints this action
+            touches, declared explicitly by the caller. Constitutional
+            validation never infers this from ``tool``, ``arguments``, or
+            ``description`` — an action that declares nothing is treated
+            as constitutionally unremarkable (see
+            ``Constitution.validate_action()``).
+
+            KNOWN BOUNDED LIMITATION: this is a self-declared capability,
+            not an independently verified one. A caller (today, only
+            hand-constructed test/production callers — nothing in the
+            pipeline currently produces an ActionRequest on its own) that
+            omits a Protected Constraint it actually touches bypasses
+            constitutional validation for that action. This is the same
+            trust model ``Tool.sacred_domains_affected`` already uses,
+            and no ACTIVE or AUTONOMOUS tool exists yet to exploit it.
+            The proper fix — a tool-declared, independently-verified
+            capability envelope — is deliberately out of scope for this
+            milestone.
+        human_authorized: Whether a human has explicitly authorized this
+            action against the Protected Constraints it declares in
+            ``affects``. Also an explicit declaration, not inferred.
     """
 
     tool: str
     arguments: dict[str, Any] = field(default_factory=dict)
     description: str = ""
+    affects: frozenset[ProtectedConstraint] = frozenset()
+    human_authorized: bool = False
+
+
+class ConstitutionalVerdict(Enum):
+    """The classified result of constitutional validation.
+
+    Answers only "is this categorically forbidden by the Constitution?"
+    — see ``Constitution.validate_action()``.
+    """
+
+    NOT_APPLICABLE = "not_applicable"  # Action declares no Protected Constraint.
+    PERMITTED = "permitted"  # Declared and explicitly human-authorized.
+    VIOLATION = "violation"  # Declared, unauthorized, and authority is loaded.
+    AUTHORITY_UNAVAILABLE = "authority_unavailable"  # Declared, but no Codex authority loaded.
+
+
+@dataclass(frozen=True)
+class ConstitutionalAssessment:
+    """The result of ``Constitution.validate_action()``.
+
+    Attributes:
+        verdict: The classified result.
+        violated: Which Protected Constraints are implicated, in
+            ``ProtectedConstraint`` declaration order. Empty unless
+            ``verdict`` is ``VIOLATION`` or ``AUTHORITY_UNAVAILABLE``.
+        reasoning: Human-readable explanation, quoting the Codex-derived
+            definition where available.
+    """
+
+    verdict: ConstitutionalVerdict
+    violated: tuple[ProtectedConstraint, ...] = ()
+    reasoning: str = ""
 
 
 class ExecutionOutcome(Enum):
@@ -208,6 +264,7 @@ class ExecutionOutcome(Enum):
     """
 
     NO_ACTION = "no_action"  # No ActionRequest was supplied.
+    DENIED_CONSTITUTION = "denied_constitution"  # Constitutional gate refused execution.
     DENIED_AUTONOMY = "denied_autonomy"  # Autonomy gate refused execution.
     TOOL_NOT_FOUND = "tool_not_found"  # No tool registered under that name.
     DENIED_TOOL = "denied_tool"  # Registry-level permission check refused.
@@ -234,6 +291,8 @@ class ExecutionRecord:
         error: A human-readable error message, for any non-success outcome.
         duration_ms: Wall-clock time spent inside the registry call.
         autonomy_level: The AutonomyLevel name in effect at execution time.
+        violated_constraints: Canonical ``ProtectedConstraint`` values
+            implicated, if ``outcome`` is ``DENIED_CONSTITUTION``.
     """
 
     outcome: ExecutionOutcome
@@ -243,6 +302,7 @@ class ExecutionRecord:
     error: str | None = None
     duration_ms: float = 0.0
     autonomy_level: str | None = None
+    violated_constraints: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------

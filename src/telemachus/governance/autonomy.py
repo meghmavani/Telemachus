@@ -19,6 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from telemachus.core.codex import ProtectedConstraint
 from telemachus.core.constitution import Constitution
 from telemachus.core.types import AutonomyDecision, AutonomyLevel, RiskLevel
 
@@ -41,28 +42,33 @@ AUTONOMY_DOMAINS: tuple[str, ...] = (
 
 # ---------------------------------------------------------------------------
 # Sacred constraints — can NEVER be overridden
+#
+# Keyed by ProtectedConstraint, the canonical constitutional identifier
+# (core/codex.py) — this module does not define its own constitutional
+# set. The keyword lists themselves are autonomy-specific detection
+# heuristics, not Codex content; they are unchanged.
 # ---------------------------------------------------------------------------
 
-SACRED_CONSTRAINT_KEYWORDS: dict[str, list[str]] = {
-    "constitution": [
+SACRED_CONSTRAINT_KEYWORDS: dict[ProtectedConstraint, list[str]] = {
+    ProtectedConstraint.CONSTITUTION_INTEGRITY: [
         "constitution", "modify constitution", "change constitution",
         "rewrite constitution", "amend constitution", "override constitution",
     ],
-    "resources": [
+    ProtectedConstraint.RESOURCE_AUTHORIZATION: [
         "money", "payment", "purchase", "buy", "spend", "compute",
         "server", "hosting", "subscription", "time commitment",
         "external system", "api key", "credential",
     ],
-    "human_meaning": [
+    ProtectedConstraint.HUMAN_MEANING: [
         "memory", "emotional context", "identity", "personal history",
         "life story", "meaning", "alter memory", "modify memory",
         "delete memory", "rewrite memory",
     ],
-    "relationships": [
+    ProtectedConstraint.RELATIONSHIP_INTEGRITY: [
         "relationship", "friend", "family", "partner", "connection",
         "remove relationship", "modify relationship", "redefine relationship",
     ],
-    "major_life_decisions": [
+    ProtectedConstraint.HUMAN_AUTHORITY_LIFE_IMPACTING: [
         "career", "health", "education", "major decision",
         "life decision", "life change",
     ],
@@ -126,7 +132,7 @@ class AutonomyCharter:
     # Sacred constraint keywords for detection
     # ------------------------------------------------------------------
 
-    _sacred_keywords: dict[str, list[str]] = SACRED_CONSTRAINT_KEYWORDS
+    _sacred_keywords: dict[ProtectedConstraint, list[str]] = SACRED_CONSTRAINT_KEYWORDS
 
     # ------------------------------------------------------------------
     # Risk-to-autonomy mapping
@@ -455,23 +461,38 @@ class AutonomyCharter:
         action_lower = action.lower()
         violated: list[str] = []
 
-        for constraint_name, keywords in self._sacred_keywords.items():
+        for constraint, keywords in self._sacred_keywords.items():
             for keyword in keywords:
                 if keyword in action_lower:
-                    violated.append(constraint_name)
+                    violated.append(constraint.value)
                     break
 
         # Also check context for sacred constraint flags
-        if ctx.get("modifies_constitution") and "constitution" not in violated:
-            violated.append("constitution")
-        if ctx.get("involves_resources") and "resources" not in violated:
-            violated.append("resources")
-        if ctx.get("alters_human_meaning") and "human_meaning" not in violated:
-            violated.append("human_meaning")
-        if ctx.get("modifies_relationships") and "relationships" not in violated:
-            violated.append("relationships")
-        if ctx.get("major_life_decision") and "major_life_decisions" not in violated:
-            violated.append("major_life_decisions")
+        if (
+            ctx.get("modifies_constitution")
+            and ProtectedConstraint.CONSTITUTION_INTEGRITY.value not in violated
+        ):
+            violated.append(ProtectedConstraint.CONSTITUTION_INTEGRITY.value)
+        if (
+            ctx.get("involves_resources")
+            and ProtectedConstraint.RESOURCE_AUTHORIZATION.value not in violated
+        ):
+            violated.append(ProtectedConstraint.RESOURCE_AUTHORIZATION.value)
+        if (
+            ctx.get("alters_human_meaning")
+            and ProtectedConstraint.HUMAN_MEANING.value not in violated
+        ):
+            violated.append(ProtectedConstraint.HUMAN_MEANING.value)
+        if (
+            ctx.get("modifies_relationships")
+            and ProtectedConstraint.RELATIONSHIP_INTEGRITY.value not in violated
+        ):
+            violated.append(ProtectedConstraint.RELATIONSHIP_INTEGRITY.value)
+        if (
+            ctx.get("major_life_decision")
+            and ProtectedConstraint.HUMAN_AUTHORITY_LIFE_IMPACTING.value not in violated
+        ):
+            violated.append(ProtectedConstraint.HUMAN_AUTHORITY_LIFE_IMPACTING.value)
 
         if violated:
             return _SacredConstraintCheck(

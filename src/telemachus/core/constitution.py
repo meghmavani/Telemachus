@@ -21,6 +21,13 @@ from telemachus.core.codex import (
     parse_first_memory,
     parse_protected_constraints,
 )
+from telemachus.core.types import ActionRequest, ConstitutionalAssessment, ConstitutionalVerdict
+
+#: Declaration order of ProtectedConstraint, for deterministic sorting.
+#: Never rely on set-iteration order when reporting violations.
+_CONSTRAINT_ORDER: dict[ProtectedConstraint, int] = {
+    c: i for i, c in enumerate(ProtectedConstraint)
+}
 
 
 @dataclass(frozen=True)
@@ -122,23 +129,76 @@ class Constitution:
                 return pc
         return None
 
-    def validate_action(self, action_description: str) -> tuple[bool, list[str]]:
-        """Check if an action would violate any sacred constraints.
+    def validate_action(self, action: ActionRequest) -> ConstitutionalAssessment:
+        """Check whether an action is categorically forbidden by the Constitution.
 
-        This is a structural check only — the actual ethical evaluation
-        is performed by the Ethical Boundary Engine. This method verifies
-        that no sacred constraint is explicitly contradicted.
+        This answers only one question: *is this action categorically
+        forbidden?* It does not decide, and must never be used in place
+        of, ethical acceptability (Ethical Boundary Engine), autonomy
+        permission (Autonomy Charter), risk severity or option ranking
+        (Risk Model / Decision), tool permission (Tool Policy), or
+        whether execution actually occurs (Execution Layer). Those
+        remain the downstream layers' responsibility
+        (codex/SYSTEM_INTEGRATION.md, "Conflict Resolution Hierarchy").
+
+        The caller declares which Protected Constraints an action
+        touches via ``action.affects`` and whether a human has
+        authorized it via ``action.human_authorized``. This method never
+        infers either from ``action.tool``, ``action.arguments``, or
+        ``action.description`` — no keyword matching, no NLP. An action
+        that declares no affected constraint is not evaluated against
+        the Constitution at all; it is ``NOT_APPLICABLE``, and downstream
+        governance continues normally. This keeps the Constitution a
+        boundary, not a universal allow/deny policy engine.
+
+        Algorithm, in order:
+            1. ``action.affects`` empty -> NOT_APPLICABLE.
+            2. ``self.protected_constraints`` empty (no Codex authority
+               loaded) -> AUTHORITY_UNAVAILABLE. Fails closed: a
+               protected action can never proceed merely because no
+               Constitution was loaded.
+            3. ``action.human_authorized`` -> PERMITTED.
+            4. Otherwise -> VIOLATION.
 
         Args:
-            action_description: Description of the proposed action.
+            action: The ActionRequest to validate.
 
         Returns:
-            A tuple of (is_valid, list_of_violated_principles).
+            A ConstitutionalAssessment. ``violated`` is always sorted by
+            ``ProtectedConstraint`` declaration order — never set order.
         """
-        violated: list[str] = []
-        # Structural validation: check for explicit violations
-        # The full evaluation is done by the Ethical Boundary Engine
-        return len(violated) == 0, violated
+        if not action.affects:
+            return ConstitutionalAssessment(verdict=ConstitutionalVerdict.NOT_APPLICABLE)
+
+        violated = tuple(sorted(action.affects, key=lambda c: _CONSTRAINT_ORDER[c]))
+
+        if not self.protected_constraints:
+            return ConstitutionalAssessment(
+                verdict=ConstitutionalVerdict.AUTHORITY_UNAVAILABLE,
+                violated=violated,
+                reasoning=(
+                    "No Codex-derived Protected Constraints are loaded; a "
+                    "protected action cannot be authorized without "
+                    "constitutional authority."
+                ),
+            )
+
+        if action.human_authorized:
+            return ConstitutionalAssessment(verdict=ConstitutionalVerdict.PERMITTED)
+
+        # protected_constraints is all-or-nothing (parse_protected_constraints
+        # requires exactly the five canonical entries), so every constraint in
+        # `violated` is guaranteed to have a definition here.
+        details = "; ".join(
+            f"{pc.name}: {pc.definition}"
+            for pc in (self.get_protected_constraint(c) for c in violated)
+            if pc is not None
+        )
+        return ConstitutionalAssessment(
+            verdict=ConstitutionalVerdict.VIOLATION,
+            violated=violated,
+            reasoning=f"Action touches Protected Constraint(s) without authorization — {details}",
+        )
 
 
 def create_default_constitution() -> Constitution:

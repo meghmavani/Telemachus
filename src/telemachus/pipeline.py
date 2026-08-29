@@ -30,11 +30,15 @@ from typing import Any
 from telemachus.cognition.evolution import EvolutionEngine, EvolutionStatus
 from telemachus.cognition.learning import LearningEngine
 from telemachus.cognition.reflection import ReflectionEngine
+from telemachus.core.codex import ProtectedConstraint
+from telemachus.core.constitution import Constitution
 from telemachus.core.types import (
     ActionRequest,
     AutonomyDecision,
     AutonomyLevel,
     CommunicationMode,
+    ConstitutionalAssessment,
+    ConstitutionalVerdict,
     EthicalAssessment,
     EthicalVerdict,
     ExecutionOutcome,
@@ -163,6 +167,7 @@ def _execution_record_to_dict(record: ExecutionRecord) -> dict[str, Any]:
         "error": record.error,
         "duration_ms": record.duration_ms,
         "autonomy_level": record.autonomy_level,
+        "violated_constraints": list(record.violated_constraints),
     }
 
 
@@ -181,6 +186,29 @@ def _trace_to_dict(trace: PipelineTrace) -> dict[str, Any]:
             _execution_record_to_dict(trace.execution) if trace.execution else None
         ),
     }
+
+
+def _validate_action_without_constitution(
+    action_request: ActionRequest,
+) -> ConstitutionalAssessment:
+    """The constitutional gate's fallback when no Constitution is wired.
+
+    Mirrors ``Constitution.validate_action()``'s first two steps exactly,
+    without constructing a throwaway Constitution: an action declaring no
+    Protected Constraint is NOT_APPLICABLE regardless; one that does is
+    AUTHORITY_UNAVAILABLE, since there is no authority to authorize it
+    against. This path is reachable only via direct ``CognitivePipeline()``
+    construction in tests — the production composition root
+    (``wiring.build_pipeline()``) always supplies a real Constitution.
+    """
+    if not action_request.affects:
+        return ConstitutionalAssessment(verdict=ConstitutionalVerdict.NOT_APPLICABLE)
+    order = {c: i for i, c in enumerate(ProtectedConstraint)}
+    return ConstitutionalAssessment(
+        verdict=ConstitutionalVerdict.AUTHORITY_UNAVAILABLE,
+        violated=tuple(sorted(action_request.affects, key=lambda c: order[c])),
+        reasoning="No Constitution is configured on this pipeline.",
+    )
 
 
 def _safe_json_dumps(payload: dict[str, Any]) -> str:
@@ -226,6 +254,15 @@ class CognitivePipeline:
             None, Stage 6 always yields NO_ACTION (no action requested)
             or TOOL_NOT_FOUND (an action was requested but nothing can
             serve it) — it never invents behavior for a missing registry.
+        constitution: The authoritative Constitution backing the
+            constitutional gate in Stage 6 (optional). The production
+            composition root (``wiring.build_pipeline()``) always
+            supplies the Codex-derived Constitution from Bootstrap;
+            ``None`` is for direct construction in tests. When None, an
+            action that declares no ``affects`` is unaffected (still
+            NOT_APPLICABLE); an action that does declare ``affects`` is
+            treated as AUTHORITY_UNAVAILABLE — the same fail-closed
+            behavior as a Constitution with no Codex authority loaded.
         last_trace: The PipelineTrace from the most recent process() call,
             or None before the first call. Exposed for introspection and
             testing; process() keeps its established PipelineResult
@@ -243,6 +280,7 @@ class CognitivePipeline:
         evolution_engine: EvolutionEngine | None = None,
         memory_store: MemoryStore | None = None,
         tool_registry: ToolRegistry | None = None,
+        constitution: Constitution | None = None,
     ) -> None:
         """Initialize the cognitive pipeline.
 
@@ -256,6 +294,8 @@ class CognitivePipeline:
             evolution_engine: Evolution engine. Created if None.
             memory_store: Memory store for persistence. Optional.
             tool_registry: Tool registry for Stage 6 execution. Optional.
+            constitution: Authoritative Constitution for the Stage 6
+                constitutional gate. Optional; see class docstring.
         """
         self.risk_evaluator = risk_evaluator or RiskEvaluator()
         self.ethical_engine = ethical_engine or EthicalBoundaryEngine()
@@ -266,6 +306,7 @@ class CognitivePipeline:
         self.evolution_engine = evolution_engine or EvolutionEngine()
         self.memory_store = memory_store
         self.tool_registry = tool_registry
+        self.constitution = constitution
         self.last_trace: PipelineTrace | None = None
 
     # ------------------------------------------------------------------
@@ -820,10 +861,37 @@ class CognitivePipeline:
     ) -> ExecutionRecord:
         """Authorize and run one ActionRequest.
 
+        The constitutional gate runs first, before autonomy: nothing
+        downstream may override, broaden, narrow, or reinterpret the
+        Protected Constraints (codex/SYSTEM_INTEGRATION.md, "Conflict
+        Resolution Hierarchy" — Constitution ranks above Ethics, Autonomy,
+        Risk/Decision, Tool Policy, and Execution). A VIOLATION or
+        AUTHORITY_UNAVAILABLE verdict denies execution outright; PERMITTED
+        and NOT_APPLICABLE both fall through to the existing autonomy gate
+        unchanged.
+
         Split out of ``_stage_execution`` for readability; may raise on
         a genuinely unexpected failure, which the caller classifies as
         TOOL_ERROR rather than letting escape.
         """
+        constitutional = (
+            self.constitution.validate_action(action_request)
+            if self.constitution is not None
+            else _validate_action_without_constitution(action_request)
+        )
+        if constitutional.verdict in (
+            ConstitutionalVerdict.VIOLATION,
+            ConstitutionalVerdict.AUTHORITY_UNAVAILABLE,
+        ):
+            return ExecutionRecord(
+                outcome=ExecutionOutcome.DENIED_CONSTITUTION,
+                tool=action_request.tool,
+                arguments=action_request.arguments,
+                error=f"Constitutional gate denied execution: {constitutional.reasoning}",
+                violated_constraints=tuple(c.value for c in constitutional.violated),
+                autonomy_level=autonomy_level,
+            )
+
         authorized = (
             autonomy_decision is not None
             and autonomy_decision.allowed

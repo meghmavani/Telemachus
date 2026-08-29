@@ -415,7 +415,14 @@ def start_chat(
         runtime.shutdown()
         sys.exit(1)
 
-    pipeline = build_pipeline(config, memory_store=runtime.memory_store)
+    if bootstrap_result.constitution is None:  # pragma: no cover — set on every successful start()
+        console.print("[bold red]ERROR:[/bold red] Runtime did not provide a Constitution.")
+        runtime.shutdown()
+        sys.exit(1)
+
+    pipeline = build_pipeline(
+        config, memory_store=runtime.memory_store, constitution=bootstrap_result.constitution
+    )
 
     try:
         session = ChatSession(

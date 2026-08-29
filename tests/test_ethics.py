@@ -8,8 +8,8 @@ import pytest
 
 from telemachus.core.types import EthicalVerdict
 from telemachus.governance.ethics import (
+    ETHICAL_CONCERNS,
     ETHICAL_HIERARCHY,
-    SACRED_CONSTRAINTS,
     EthicalBoundaryEngine,
 )
 
@@ -57,10 +57,15 @@ class TestSacredConstraints:
         assert "resource_authorization" in result.violated_constraints
 
     def test_revan_memory_modification_blocked(self, engine: EthicalBoundaryEngine) -> None:
-        """Modifying Revan-related memory should be BLOCKED."""
+        """Modifying Revan-related memory should be BLOCKED.
+
+        Regression: this used to report "identity_integrity", an
+        independently-spelled identifier with no Codex basis. It must
+        now report the canonical ProtectedConstraint value, "human_meaning".
+        """
         result = engine.evaluate("modify Revan's memory records autonomously")
         assert result.verdict == EthicalVerdict.BLOCKED
-        assert "identity_integrity" in result.violated_constraints
+        assert "human_meaning" in result.violated_constraints
 
     def test_relationship_manipulation_blocked(self, engine: EthicalBoundaryEngine) -> None:
         """Manipulating relationships should be BLOCKED."""
@@ -77,9 +82,14 @@ class TestSacredConstraints:
         assert len(result.violated_constraints) >= 2
 
     def test_sacred_constraint_count(self, engine: EthicalBoundaryEngine) -> None:
-        """There should be exactly 6 sacred constraints."""
+        """There should be exactly 5 constitutional Protected Constraints
+        plus 2 Ethics-owned ethical concerns (human safety, consent) — 7
+        total. This replaces the old, incorrect 6: the previous count
+        conflated the two categories, wrongly named Human Meaning as
+        "identity_integrity", and omitted Human Authority over
+        Life-Impacting Decisions entirely."""
         constraints = engine.get_sacred_constraints()
-        assert len(constraints) == 6
+        assert len(constraints) == 7
 
     def test_is_sacred_returns_true(self, engine: EthicalBoundaryEngine) -> None:
         """is_sacred should return True for actual sacred constraints."""
@@ -372,9 +382,9 @@ class TestEdgeCases:
         result = engine.evaluate("display the current time", context=None)
         assert result.verdict == EthicalVerdict.ALLOWED
 
-    def test_sacred_constraints_are_immutable(self) -> None:
-        """SACRED_CONSTRAINTS should be a tuple (immutable)."""
-        assert isinstance(SACRED_CONSTRAINTS, tuple)
+    def test_ethical_concerns_are_immutable(self) -> None:
+        """ETHICAL_CONCERNS should be a tuple (immutable)."""
+        assert isinstance(ETHICAL_CONCERNS, tuple)
 
     def test_ethical_hierarchy_is_immutable(self) -> None:
         """ETHICAL_HIERARCHY should be a tuple (immutable)."""
