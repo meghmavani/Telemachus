@@ -8,6 +8,8 @@ them.
 
 from __future__ import annotations
 
+import threading
+import time as time_module
 from collections.abc import Generator
 from pathlib import Path
 
@@ -16,10 +18,17 @@ import pytest
 from telemachus.bootstrap import BootstrapPhase, BootstrapResult, PhaseResult, PhaseStatus
 from telemachus.config import TelemachusConfig, load_config_from_path
 from telemachus.memory.store import MemoryStore
+from telemachus.runtime.event_loop import EventLoop
 from telemachus.runtime.lifecycle import RuntimeLifecycle
+from telemachus.runtime.observations import Observation
 from telemachus.runtime.signals import SignalHandler
 from telemachus.runtime.state_store import RuntimeStateStore
-from telemachus.runtime.states import LifecycleState, PreviousTermination
+from telemachus.runtime.states import (
+    LifecycleState,
+    PreviousTermination,
+    RunningMode,
+    allowed_transitions,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures: a minimal, complete Telemachus installation in a temp directory,
@@ -512,3 +521,168 @@ class TestShutdown:
         lc = _new_lifecycle(config)
         lc.shutdown()  # never started; must degrade gracefully
         assert lc.state == LifecycleState.STOPPED
+
+
+# ---------------------------------------------------------------------------
+# EL-1: Event Loop integration
+# ---------------------------------------------------------------------------
+
+
+class _BrokenEventLoop:
+    """A stand-in whose ``tick()`` itself raises, rather than isolating a
+    failure internally the way the real EventLoop does — this exercises
+    RuntimeLifecycle's own outer guard, not EventLoop's."""
+
+    pending_count = 1
+
+    def tick(self) -> int:
+        raise RuntimeError("tick exploded")
+
+
+def _request_shutdown_after(lc: RuntimeLifecycle, delay: float) -> threading.Thread:
+    """Start a thread that requests shutdown shortly after the wait loop
+    begins polling, so at least one real Event Loop tick has a chance to
+    run first. Used with a shrunk poll interval to keep this fast."""
+
+    def _later() -> None:
+        time_module.sleep(delay)
+        lc.request_shutdown()
+
+    thread = threading.Thread(target=_later)
+    thread.start()
+    return thread
+
+
+class TestEventLoopIntegration:
+    def test_event_loop_cannot_tick_before_running(self, config: TelemachusConfig) -> None:
+        """wait_for_shutdown_request() — the only call site that ever
+        ticks — already requires RUNNING; an Event Loop attached earlier
+        must not have processed anything by the time that guard fires."""
+        loop = EventLoop(lambda obs: None)
+        lc = _new_lifecycle(config)
+        lc.attach_event_loop(loop)
+        loop.submit(Observation(summary="premature"))
+
+        with pytest.raises(RuntimeError, match="requires RUNNING"):
+            lc.wait_for_shutdown_request()
+
+        assert loop.processed_count == 0
+
+    def test_event_loop_ticks_during_the_running_wait_loop(
+        self, config: TelemachusConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import telemachus.runtime.lifecycle as lifecycle_module
+
+        monkeypatch.setattr(lifecycle_module, "_SHUTDOWN_POLL_SECONDS", 0.01)
+
+        received: list[Observation] = []
+        loop = EventLoop(received.append)
+
+        lc = _new_lifecycle(config)
+        lc.start()
+        lc.attach_event_loop(loop)
+        loop.submit(Observation(summary="integration test observation"))
+
+        thread = _request_shutdown_after(lc, delay=0.05)
+        lc.wait_for_shutdown_request()
+        thread.join()
+
+        assert loop.processed_count == 1
+        assert [obs.summary for obs in received] == ["integration test observation"]
+
+        lc.shutdown()
+        assert lc.state == LifecycleState.STOPPED
+
+    def test_running_mode_is_active_only_during_dispatch(
+        self, config: TelemachusConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import telemachus.runtime.lifecycle as lifecycle_module
+
+        monkeypatch.setattr(lifecycle_module, "_SHUTDOWN_POLL_SECONDS", 0.01)
+
+        lc = _new_lifecycle(config)
+        observed_modes: list[RunningMode] = []
+
+        def invoker(observation: Observation) -> None:
+            observed_modes.append(lc.running_mode)
+
+        lc.start()
+        assert lc.running_mode == RunningMode.IDLE
+        lc.attach_event_loop(EventLoop(invoker))
+        assert lc.event_loop is not None
+        lc.event_loop.submit(Observation(summary="x"))
+
+        thread = _request_shutdown_after(lc, delay=0.05)
+        lc.wait_for_shutdown_request()
+        thread.join()
+
+        assert observed_modes == [RunningMode.ACTIVE]
+        assert lc.running_mode == RunningMode.IDLE  # restored once dispatch completed
+
+        lc.shutdown()
+
+    def test_shutdown_stops_event_loop_before_further_ticks(
+        self, config: TelemachusConfig
+    ) -> None:
+        """Queued-but-unprocessed Observations must not block shutdown,
+        and no further dispatch may occur once shutdown has begun."""
+        processed: list[Observation] = []
+        loop = EventLoop(processed.append)
+
+        lc = _new_lifecycle(config)
+        lc.start()
+        lc.attach_event_loop(loop)
+        loop.submit(Observation(summary="never gets a chance"))
+
+        lc.shutdown()
+        assert lc.state == LifecycleState.STOPPED
+
+        # A tick attempted after shutdown must be a no-op: `_shutting_down`
+        # is set before the memory store is closed, and _tick_event_loop
+        # checks it unconditionally.
+        lc._tick_event_loop()
+
+        assert processed == []
+        assert loop.pending_count == 1  # left queued, never drained
+        assert loop.processed_count == 0
+
+    def test_failing_event_loop_tick_does_not_prevent_clean_shutdown(
+        self, config: TelemachusConfig
+    ) -> None:
+        lc = _new_lifecycle(config)
+        lc.start()
+        lc.attach_event_loop(_BrokenEventLoop())  # type: ignore[arg-type]
+
+        lc._tick_event_loop()  # must not raise
+        assert lc.running_mode == RunningMode.IDLE  # finally-block still restores IDLE
+
+        lc.shutdown()
+        assert lc.state == LifecycleState.STOPPED
+
+    def test_lifecycle_without_an_event_loop_is_unaffected(
+        self, config: TelemachusConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No Event Loop attached: running_mode stays fixed at IDLE and
+        wait_for_shutdown_request() behaves exactly as before this
+        milestone."""
+        import telemachus.runtime.lifecycle as lifecycle_module
+
+        monkeypatch.setattr(lifecycle_module, "_SHUTDOWN_POLL_SECONDS", 0.01)
+
+        lc = _new_lifecycle(config)
+        lc.start()
+        assert lc.event_loop is None
+
+        thread = _request_shutdown_after(lc, delay=0.03)
+        lc.wait_for_shutdown_request()
+        thread.join()
+
+        assert lc.running_mode == RunningMode.IDLE
+        lc.shutdown()
+        assert lc.state == LifecycleState.STOPPED
+
+    def test_transition_table_is_unchanged_by_event_loop_integration(self) -> None:
+        """EL-1 introduces no new lifecycle states and no new transitions."""
+        assert allowed_transitions(LifecycleState.RUNNING) == frozenset(
+            {LifecycleState.SHUTTING_DOWN}
+        )

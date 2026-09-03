@@ -20,7 +20,7 @@ from telemachus.bootstrap import BootstrapProtocol, BootstrapResult
 from telemachus.config import ConfigError, TelemachusConfig, load_config_from_path
 from telemachus.logging_config import get_logger, setup_logging
 from telemachus.runtime import PreviousTermination, RecoveryBriefing
-from telemachus.wiring import build_runtime
+from telemachus.wiring import build_event_loop, build_pipeline, build_runtime
 
 app = typer.Typer(
     name="telemachus",
@@ -111,6 +111,27 @@ def start(
     # Display first awakening questions if this is a first awakening
     if result.first_awakening and runtime.bootstrap_protocol is not None:
         _display_first_awakening(runtime.bootstrap_protocol)
+
+    # Build the Core pipeline and attach the Event Loop now that
+    # Bootstrap has produced the memory store and Constitution it
+    # depends on — neither exists before start() returns. This is what
+    # gives the long-running `start` process something to reason with;
+    # previously it built only the Runtime and never a pipeline at all.
+    if runtime.memory_store is None:  # pragma: no cover — set on every successful start()
+        console.print("[bold red]ERROR:[/bold red] Runtime did not provide a memory store.")
+        runtime.shutdown()
+        raise typer.Exit(code=1)
+
+    if result.constitution is None:  # pragma: no cover — set on every successful start()
+        console.print("[bold red]ERROR:[/bold red] Runtime did not provide a Constitution.")
+        runtime.shutdown()
+        raise typer.Exit(code=1)
+
+    pipeline = build_pipeline(
+        config, memory_store=runtime.memory_store, constitution=result.constitution
+    )
+    event_loop = build_event_loop(pipeline, session_id=runtime.snapshot().session_id)
+    runtime.attach_event_loop(event_loop)
 
     log.info(
         "Telemachus started successfully",

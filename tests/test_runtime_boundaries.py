@@ -109,3 +109,72 @@ def test_runtime_does_not_import_codex_or_constitution() -> None:
         f"runtime/ must not import telemachus.core.codex or reference "
         f"Constitution/ProtectedConstraint: {offenders}"
     )
+
+
+# ---------------------------------------------------------------------------
+# EL-1: the Event Loop must reach Core reasoning only through an opaque
+# invoker built by the composition root, never by importing Core pieces
+# itself.
+# ---------------------------------------------------------------------------
+
+_FORBIDDEN_RUNTIME_IMPORT_RE = re.compile(
+    r"^\s*(from\s+telemachus\.(pipeline|wiring|tools)\b"
+    r"|import\s+telemachus\.(pipeline|wiring|tools)\b)",
+    re.MULTILINE,
+)
+
+
+def test_runtime_does_not_import_pipeline_wiring_or_tools() -> None:
+    """The Event Loop dispatches Observations through an opaque callable
+    (``telemachus.runtime.event_loop.CoreInvoker``) supplied by
+    ``wiring.py``. It must never import the pipeline, the composition
+    root, or the tool system directly — doing so would let the Runtime
+    reach reasoning or execution on its own rather than through the
+    single seam the composition root controls.
+    """
+    runtime_root = SRC_ROOT / "runtime"
+    files = sorted(runtime_root.rglob("*.py"))
+    assert files, "expected to find .py files under runtime/"
+
+    offenders = [
+        str(p.relative_to(SRC_ROOT))
+        for p in files
+        if _FORBIDDEN_RUNTIME_IMPORT_RE.search(p.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        f"runtime/ must not import telemachus.pipeline, telemachus.wiring, "
+        f"or telemachus.tools: {offenders}"
+    )
+
+
+def test_event_loop_observation_reaches_core_as_no_action() -> None:
+    """An Observation routed through the Event Loop reaches the Core and
+    yields ``ExecutionOutcome.NO_ACTION`` — proof, not assertion, that
+    EL-1 is structurally incapable of executing a tool: nothing places
+    an ``ActionRequest`` in the pipeline context, so Stage 6 has nothing
+    to act on regardless of autonomy level or tool registration.
+    """
+    from telemachus.core.types import ExecutionOutcome
+    from telemachus.pipeline import CognitivePipeline
+    from telemachus.runtime.event_loop import EventLoop
+    from telemachus.runtime.observations import Observation
+    from telemachus.tools.builtin import EchoTool
+    from telemachus.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    pipeline = CognitivePipeline(tool_registry=registry)
+
+    def invoke(observation: Observation) -> None:
+        pipeline.process(
+            observation.summary, context={"observation": observation.to_dict()}
+        )
+
+    loop = EventLoop(invoke)
+    loop.submit(Observation(summary="a routine internal observation"))
+    dispatched = loop.tick()
+
+    assert dispatched == 1
+    assert pipeline.last_trace is not None
+    assert pipeline.last_trace.execution is not None
+    assert pipeline.last_trace.execution.outcome is ExecutionOutcome.NO_ACTION

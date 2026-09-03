@@ -23,6 +23,7 @@ from collections.abc import Callable
 from telemachus.bootstrap import BootstrapProtocol, BootstrapResult
 from telemachus.config import TelemachusConfig
 from telemachus.memory.store import MemoryStore
+from telemachus.runtime.event_loop import EventLoop
 from telemachus.runtime.records import LifecycleSnapshot, RecoveryBriefing, SessionRecord
 from telemachus.runtime.signals import SignalHandler
 from telemachus.runtime.state_store import RuntimeStateStore
@@ -63,10 +64,11 @@ class RuntimeLifecycle:
 
     Attributes:
         state: The current LifecycleState.
-        running_mode: RUNNING's substate. Fixed at IDLE in this milestone —
-            nothing yet drives it to ACTIVE, since that requires the Event
-            Loop (a future milestone). Present now so the substate exists
-            in the model lifecycle.md describes.
+        running_mode: RUNNING's substate. IDLE except for the brief
+            window a tick spends dispatching a queued Observation to the
+            attached Event Loop, when it is ACTIVE. With no Event Loop
+            attached, this remains fixed at IDLE exactly as before this
+            milestone.
     """
 
     def __init__(
@@ -76,6 +78,7 @@ class RuntimeLifecycle:
         memory_store_factory: Callable[[], MemoryStore],
         signal_handler: SignalHandler | None = None,
         bootstrap_factory: BootstrapFactory | None = None,
+        event_loop: EventLoop | None = None,
     ) -> None:
         """Initialize the Runtime lifecycle.
 
@@ -93,15 +96,24 @@ class RuntimeLifecycle:
             bootstrap_factory: Optional factory for BootstrapProtocol,
                 primarily for tests that need to inject a failing or
                 fake bootstrap without touching real codex files.
+            event_loop: Optional Event Loop to drive from the RUNNING
+                wait loop. Usually attached later via
+                ``attach_event_loop()`` once the composition root has
+                built whatever the Event Loop's opaque invoker wraps —
+                this parameter exists mainly so tests can construct a
+                fully-wired lifecycle in one call. Ticking never occurs
+                before RUNNING regardless of when it is supplied.
         """
         self._config = config
         self._state_store = state_store
         self._memory_store_factory = memory_store_factory
         self._signals = signal_handler or SignalHandler()
         self._bootstrap_factory = bootstrap_factory or _default_bootstrap_factory
+        self._event_loop = event_loop
 
         self._state = LifecycleState.BOOTING
         self.running_mode = RunningMode.IDLE
+        self._shutting_down = False
 
         self._session_id: str | None = None
         self._instance_id: str | None = None
@@ -143,6 +155,27 @@ class RuntimeLifecycle:
     def recovery_briefing(self) -> RecoveryBriefing | None:
         """The Recovery/Reconciliation briefing, once start() has assembled it."""
         return self._recovery_briefing
+
+    @property
+    def event_loop(self) -> EventLoop | None:
+        """The attached Event Loop, or None if none has been attached yet."""
+        return self._event_loop
+
+    def attach_event_loop(self, event_loop: EventLoop) -> None:
+        """Attach the Event Loop the RUNNING wait loop should drive.
+
+        Safe to call at any point in the lifecycle — ticking only ever
+        happens from inside ``wait_for_shutdown_request()``, which
+        itself only runs while ``state`` is RUNNING. Typically called by
+        the composition root right after ``start()`` returns, once the
+        pipeline the Event Loop's opaque invoker wraps has been built
+        (that pipeline needs ``BootstrapResult`` fields ``start()``
+        itself produces, so it cannot exist before this point).
+
+        Args:
+            event_loop: The Event Loop to drive.
+        """
+        self._event_loop = event_loop
 
     def snapshot(self) -> LifecycleSnapshot:
         """Return a read-only view of the Runtime's current state.
@@ -327,14 +360,15 @@ class RuntimeLifecycle:
     def wait_for_shutdown_request(self) -> None:
         """Block in RUNNING until a shutdown is requested.
 
-        Replaces the placeholder ``while True: time.sleep(1)`` with an
-        interruptible wait on the signal handler's Event. Polls the Event
-        on a short interval rather than blocking on it indefinitely —
-        Windows does not reliably interrupt an arbitrary blocking C call
-        the instant a console signal arrives, so a bounded wait is used
-        to guarantee the request is noticed promptly on every supported
-        platform, at the same granularity the placeholder it replaces
-        already had.
+        Polls the signal handler's Event on a short interval rather than
+        blocking on it indefinitely — Windows does not reliably interrupt
+        an arbitrary blocking C call the instant a console signal
+        arrives, so a bounded wait is used to guarantee the request is
+        noticed promptly on every supported platform. Each poll that
+        does not see a shutdown request drives one Event Loop tick
+        (``_tick_event_loop()``) if an Event Loop is attached — this is
+        the Event Loop's entire integration with process lifetime: it
+        runs on this thread, at this cadence, and never on its own.
 
         Does not itself perform shutdown — this lets a caller (such as
         the CLI) react between the request arriving and shutdown running,
@@ -350,7 +384,33 @@ class RuntimeLifecycle:
                 f"current state is {self._state.name}"
             )
         while not self._signals.shutdown_requested.wait(timeout=_SHUTDOWN_POLL_SECONDS):
-            pass
+            self._tick_event_loop()
+
+    def _tick_event_loop(self) -> None:
+        """Run one Event Loop tick, if attached and not shutting down.
+
+        A tick failure must degrade, never terminate, the Runtime
+        (docs/lifecycle.md, "Failure Handling"). ``EventLoop.tick()``
+        already isolates per-Observation failures internally; the
+        try/except here is defense against a failure in the Event
+        Loop's own bookkeeping, not the expected path.
+
+        ``running_mode`` becomes ACTIVE only for the duration of an
+        actual dispatch — checking ``pending_count`` first means an
+        empty queue leaves ``running_mode`` untouched at IDLE rather
+        than flickering ACTIVE with nothing to show for it.
+        """
+        if self._event_loop is None or self._shutting_down:
+            return
+        if self._event_loop.pending_count == 0:
+            return
+        self.running_mode = RunningMode.ACTIVE
+        try:
+            self._event_loop.tick()
+        except Exception:
+            logger.exception("Event Loop tick failed; Runtime continues")
+        finally:
+            self.running_mode = RunningMode.IDLE
 
     def run_until_shutdown(self) -> None:
         """Block in RUNNING until a shutdown is requested, then shut down.
@@ -380,13 +440,19 @@ class RuntimeLifecycle:
         prevents the others from running — a subsystem that fails to
         release still lets the rest of the process shut down cleanly.
 
-        Order: transition to SHUTTING_DOWN and persist it; close the Core
-        memory store; record clean_shutdown as whether that close actually
-        succeeded; close the Runtime state store; restore signal handlers
-        and flush logging; transition to STOPPED.
+        Order: stop the Event Loop from ticking further; transition to
+        SHUTTING_DOWN and persist it; close the Core memory store; record
+        clean_shutdown as whether that close actually succeeded; close
+        the Runtime state store; restore signal handlers and flush
+        logging; transition to STOPPED.
         """
         if self._state == LifecycleState.STOPPED:
             return
+
+        # Set before anything else so a tick can never race the memory
+        # store's disconnect below — queued-but-unprocessed Observations
+        # are simply left queued; nothing here drains or blocks on them.
+        self._shutting_down = True
 
         if self._state != LifecycleState.SHUTTING_DOWN:
             self._force_transition_for_shutdown(LifecycleState.SHUTTING_DOWN)

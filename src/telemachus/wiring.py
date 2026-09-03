@@ -13,12 +13,15 @@ wiring can be wrong, and one place to test.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from telemachus.config import TelemachusConfig
 from telemachus.core.constitution import Constitution
 from telemachus.memory.store import MemoryStore
 from telemachus.pipeline import CognitivePipeline
+from telemachus.runtime.event_loop import EventLoop
 from telemachus.runtime.lifecycle import RuntimeLifecycle
+from telemachus.runtime.observations import Observation
 from telemachus.runtime.state_store import RuntimeStateStore
 from telemachus.tools.builtin import EchoTool
 from telemachus.tools.registry import ToolRegistry
@@ -93,6 +96,55 @@ def build_pipeline(
     store = memory_store if memory_store is not None else build_memory_store(config)
     registry = tool_registry if tool_registry is not None else build_tool_registry()
     return CognitivePipeline(memory_store=store, tool_registry=registry, constitution=constitution)
+
+
+def build_observation_invoker(
+    pipeline: CognitivePipeline, session_id: str
+) -> Callable[[Observation], None]:
+    """Build the opaque callable the Event Loop dispatches Observations through.
+
+    Built here rather than in ``runtime/`` because the Event Loop must
+    never import ``CognitivePipeline`` — this is the one seam through
+    which an Observation reaches Core reasoning
+    (tests/test_runtime_boundaries.py enforces the import direction).
+
+    Deliberately places no ``ActionRequest`` in the pipeline context:
+    EL-1 observations always reach Stage 6 as
+    ``ExecutionOutcome.NO_ACTION``. Candidate-action generation from an
+    Observation is future, separately-reviewed work.
+
+    Args:
+        pipeline: The Core pipeline built from Bootstrap's Constitution.
+        session_id: A stable session id used for every invocation, so
+            Observations processed across one Runtime lifetime are
+            attributed to one continuous session rather than each
+            appearing as an unrelated one-off interaction.
+
+    Returns:
+        A callable matching ``telemachus.runtime.event_loop.CoreInvoker``.
+    """
+
+    def invoke(observation: Observation) -> None:
+        pipeline.process(
+            observation.summary,
+            context={"observation": observation.to_dict()},
+            session_id=session_id,
+        )
+
+    return invoke
+
+
+def build_event_loop(pipeline: CognitivePipeline, session_id: str) -> EventLoop:
+    """Build the Runtime's Event Loop, wired to invoke ``pipeline``.
+
+    Args:
+        pipeline: The Core pipeline the Event Loop's opaque invoker wraps.
+        session_id: Passed through to ``build_observation_invoker``.
+
+    Returns:
+        An EventLoop ready for ``RuntimeLifecycle.attach_event_loop()``.
+    """
+    return EventLoop(build_observation_invoker(pipeline, session_id))
 
 
 def build_runtime(config: TelemachusConfig) -> RuntimeLifecycle:
