@@ -23,7 +23,7 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
@@ -861,23 +861,64 @@ class CognitivePipeline:
     ) -> ExecutionRecord:
         """Authorize and run one ActionRequest.
 
-        The constitutional gate runs first, before autonomy: nothing
-        downstream may override, broaden, narrow, or reinterpret the
-        Protected Constraints (codex/SYSTEM_INTEGRATION.md, "Conflict
+        Tool resolution now happens first, before the constitutional
+        gate: the registered tool's own declared ``protected_constraints``
+        (a closed-vocabulary capability envelope — see ``tools/base.py``)
+        must be unioned into what the Constitution evaluates, so a caller
+        cannot bypass a tool-declared Protected Constraint by simply
+        omitting it from ``ActionRequest.affects``. If no tool can be
+        resolved, TOOL_NOT_FOUND is returned immediately — there is
+        nothing to union, and no constitutional question to ask about a
+        tool that does not exist.
+
+        The constitutional gate itself still runs before autonomy:
+        nothing downstream may override, broaden, narrow, or reinterpret
+        the Protected Constraints (codex/SYSTEM_INTEGRATION.md, "Conflict
         Resolution Hierarchy" — Constitution ranks above Ethics, Autonomy,
         Risk/Decision, Tool Policy, and Execution). A VIOLATION or
         AUTHORITY_UNAVAILABLE verdict denies execution outright; PERMITTED
         and NOT_APPLICABLE both fall through to the existing autonomy gate
         unchanged.
 
+        The tool's capability declaration is a floor, not a ceiling: it
+        can only add to what is evaluated, never remove what the caller
+        itself declared. It is tool-owned and type-checked, not
+        independently verified against what ``execute()`` actually does
+        — see ``Tool.protected_constraints``'s docstring.
+
         Split out of ``_stage_execution`` for readability; may raise on
         a genuinely unexpected failure, which the caller classifies as
         TOOL_ERROR rather than letting escape.
         """
+        if self.tool_registry is None:
+            return ExecutionRecord(
+                outcome=ExecutionOutcome.TOOL_NOT_FOUND,
+                tool=action_request.tool,
+                arguments=action_request.arguments,
+                error="No tool registry configured",
+                autonomy_level=autonomy_level,
+            )
+
+        tool = self.tool_registry.get_tool(action_request.tool)
+        if tool is None:
+            return ExecutionRecord(
+                outcome=ExecutionOutcome.TOOL_NOT_FOUND,
+                tool=action_request.tool,
+                arguments=action_request.arguments,
+                error=f"Tool '{action_request.tool}' not found in registry",
+                autonomy_level=autonomy_level,
+            )
+
+        # Effective constitutional impact = caller declaration UNION
+        # tool-declared capability. Never mutates the original request.
+        effective_action = replace(
+            action_request, affects=action_request.affects | tool.protected_constraints
+        )
+
         constitutional = (
-            self.constitution.validate_action(action_request)
+            self.constitution.validate_action(effective_action)
             if self.constitution is not None
-            else _validate_action_without_constitution(action_request)
+            else _validate_action_without_constitution(effective_action)
         )
         if constitutional.verdict in (
             ConstitutionalVerdict.VIOLATION,
@@ -909,24 +950,6 @@ class CognitivePipeline:
                 tool=action_request.tool,
                 arguments=action_request.arguments,
                 error=f"Autonomy gate denied execution: {reason}",
-                autonomy_level=autonomy_level,
-            )
-
-        if self.tool_registry is None:
-            return ExecutionRecord(
-                outcome=ExecutionOutcome.TOOL_NOT_FOUND,
-                tool=action_request.tool,
-                arguments=action_request.arguments,
-                error="No tool registry configured",
-                autonomy_level=autonomy_level,
-            )
-
-        if self.tool_registry.get_tool(action_request.tool) is None:
-            return ExecutionRecord(
-                outcome=ExecutionOutcome.TOOL_NOT_FOUND,
-                tool=action_request.tool,
-                arguments=action_request.arguments,
-                error=f"Tool '{action_request.tool}' not found in registry",
                 autonomy_level=autonomy_level,
             )
 

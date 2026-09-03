@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
+from telemachus.core.codex import ProtectedConstraint
+
 logger = logging.getLogger("telemachus.tools.base")
 
 
@@ -94,6 +96,29 @@ class Tool(ABC):
         requires_approval: Whether this tool needs explicit approval.
         reversible: Whether tool actions can be undone.
         sacred_domains_affected: Which sacred domains this tool touches.
+            Free-form, qualitative, Tool-Policy-facing context — distinct
+            from ``protected_constraints`` below (see the Codex authority
+            terminology decision: "sacred domain" remains valid tool-layer
+            vocabulary, separate from constitutional "Protected
+            Constraints"). Consumed only by ``ToolRegistry.check_permission()``.
+        protected_constraints: Which constitutional Protected Constraints
+            this tool can touch, declared by the tool author. Closed
+            vocabulary — every element must be a ``ProtectedConstraint``
+            member; ``__init__`` rejects anything else with ``ValueError``.
+
+            This is the tool's own capability declaration, consumed by
+            ``CognitivePipeline._execute_action()`` to compute the
+            effective constitutional impact of an action as
+            ``action.affects | tool.protected_constraints`` — a floor a
+            caller cannot shrink by declaring ``affects=frozenset()``.
+
+            KNOWN LIMITATION: this declaration is tool-owned and
+            type-checked, not independently verified. Nothing in this
+            milestone checks it against what ``execute()`` actually does;
+            a tool author who under-declares this set still bypasses
+            constitutional validation for what they omitted. Static or
+            dynamic verification of a tool's declared capabilities
+            against its real behavior is deliberately out of scope here.
         trust_score: Accumulated trust from successful executions (0.0-1.0).
         execution_count: Total number of executions.
         failure_count: Total number of failures.
@@ -106,6 +131,7 @@ class Tool(ABC):
     requires_approval: bool = False
     reversible: bool = True
     sacred_domains_affected: list[str] = field(default_factory=list)
+    protected_constraints: frozenset[ProtectedConstraint] = frozenset()
     trust_score: float = 0.5
     execution_count: int = 0
     failure_count: int = 0
@@ -119,6 +145,7 @@ class Tool(ABC):
         requires_approval: bool = False,
         reversible: bool = True,
         sacred_domains_affected: list[str] | None = None,
+        protected_constraints: frozenset[ProtectedConstraint] | None = None,
         trust_score: float = 0.5,
     ) -> None:
         """Initialize a tool with its core metadata.
@@ -131,15 +158,31 @@ class Tool(ABC):
             requires_approval: Whether explicit approval is needed.
             reversible: Whether actions can be undone.
             sacred_domains_affected: Sacred domains this tool interacts with.
+            protected_constraints: Constitutional Protected Constraints
+                this tool can touch. Every element must be a
+                ``ProtectedConstraint`` member — see the class docstring's
+                "KNOWN LIMITATION" note on the trust this still assumes.
             trust_score: Initial trust score (0.0-1.0).
 
         Raises:
-            ValueError: If name is empty or trust_score is out of range.
+            ValueError: If name is empty, trust_score is out of range, or
+                protected_constraints contains a non-ProtectedConstraint
+                element.
         """
         if not name or not name.strip():
             raise ValueError("Tool name must not be empty")
         if not 0.0 <= trust_score <= 1.0:
             raise ValueError("Trust score must be between 0.0 and 1.0")
+
+        constraints = (
+            frozenset() if protected_constraints is None else frozenset(protected_constraints)
+        )
+        for constraint in constraints:
+            if not isinstance(constraint, ProtectedConstraint):
+                raise ValueError(
+                    f"protected_constraints must contain only ProtectedConstraint "
+                    f"members, got {constraint!r}"
+                )
 
         self.name = name.strip()
         self.description = description
@@ -148,6 +191,7 @@ class Tool(ABC):
         self.requires_approval = requires_approval
         self.reversible = reversible
         self.sacred_domains_affected = sacred_domains_affected or []
+        self.protected_constraints = constraints
         self.trust_score = trust_score
         self.execution_count = 0
         self.failure_count = 0
@@ -240,6 +284,7 @@ class Tool(ABC):
             "requires_approval": self.requires_approval,
             "reversible": self.reversible,
             "sacred_domains_affected": self.sacred_domains_affected,
+            "protected_constraints": [c.value for c in self.protected_constraints],
             "trust_score": self.trust_score,
             "execution_count": self.execution_count,
             "failure_count": self.failure_count,
