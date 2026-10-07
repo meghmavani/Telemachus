@@ -20,7 +20,12 @@ from telemachus.bootstrap import BootstrapProtocol, BootstrapResult
 from telemachus.config import ConfigError, TelemachusConfig, load_config_from_path
 from telemachus.logging_config import get_logger, setup_logging
 from telemachus.runtime import PreviousTermination, RecoveryBriefing
-from telemachus.wiring import build_event_loop, build_pipeline, build_runtime
+from telemachus.wiring import (
+    build_event_loop,
+    build_pipeline,
+    build_recovery_observation,
+    build_runtime,
+)
 
 app = typer.Typer(
     name="telemachus",
@@ -127,11 +132,37 @@ def start(
         runtime.shutdown()
         raise typer.Exit(code=1)
 
+    if runtime.recovery_briefing is None:  # pragma: no cover — set on every successful start()
+        console.print("[bold red]ERROR:[/bold red] Runtime did not provide a Recovery Briefing.")
+        runtime.shutdown()
+        raise typer.Exit(code=1)
+
     pipeline = build_pipeline(
         config, memory_store=runtime.memory_store, constitution=result.constitution
     )
     event_loop = build_event_loop(pipeline, session_id=runtime.snapshot().session_id)
     runtime.attach_event_loop(event_loop)
+
+    # RS-1: the first real production Observation — everything before
+    # this point already existed (RecoveryBriefing) or was plumbing with
+    # nothing flowing through it (the Event Loop). Losing this one
+    # Observation must never be silent, but it also must never be fatal:
+    # the Runtime's own Failure Handling principle (docs/lifecycle.md)
+    # is to degrade, not terminate, so startup continues either way.
+    try:
+        recovery_observation = build_recovery_observation(runtime.recovery_briefing)
+    except Exception:
+        log.exception("Failed to build the Recovery Observation; startup continues without it")
+        console.print(
+            "[yellow]Warning:[/yellow] could not build the Recovery Observation."
+        )
+    else:
+        if not event_loop.submit(recovery_observation):
+            log.error("Recovery Observation was rejected by the Event Loop (queue full)")
+            console.print(
+                "[yellow]Warning:[/yellow] the Recovery Observation was dropped "
+                "(Event Loop queue full)."
+            )
 
     log.info(
         "Telemachus started successfully",

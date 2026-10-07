@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from typing import Any
 
 from telemachus.config import TelemachusConfig
 from telemachus.core.constitution import Constitution
@@ -21,8 +22,10 @@ from telemachus.memory.store import MemoryStore
 from telemachus.pipeline import CognitivePipeline
 from telemachus.runtime.event_loop import EventLoop
 from telemachus.runtime.lifecycle import RuntimeLifecycle
-from telemachus.runtime.observations import Observation
+from telemachus.runtime.observations import Observation, ObservationSource, Priority
+from telemachus.runtime.records import RecoveryBriefing, SessionRecord
 from telemachus.runtime.state_store import RuntimeStateStore
+from telemachus.runtime.states import PreviousTermination
 from telemachus.tools.builtin import EchoTool
 from telemachus.tools.registry import ToolRegistry
 
@@ -145,6 +148,95 @@ def build_event_loop(pipeline: CognitivePipeline, session_id: str) -> EventLoop:
         An EventLoop ready for ``RuntimeLifecycle.attach_event_loop()``.
     """
     return EventLoop(build_observation_invoker(pipeline, session_id))
+
+
+def _session_record_payload(session: SessionRecord | None) -> dict[str, Any] | None:
+    """Flatten a SessionRecord into a plain dict, or None if there isn't one.
+
+    ``SessionRecord`` has no serialization method of its own (it is an
+    internal Runtime persistence type, not a Core-facing one), so this
+    is the smallest faithful translation — every field, unrenamed.
+    """
+    if session is None:
+        return None
+    return {
+        "session_id": session.session_id,
+        "pid": session.pid,
+        "started_at": session.started_at,
+        "ended_at": session.ended_at,
+        "clean_shutdown": session.clean_shutdown,
+        "last_state": session.last_state,
+    }
+
+
+def build_recovery_observation(briefing: RecoveryBriefing) -> Observation:
+    """Translate the Runtime's RecoveryBriefing into one Observation.
+
+    ``RecoveryBriefing`` already exists, is already durable-state-backed,
+    and today is discarded by every caller except a console print
+    (``main.py:_display_recovery_briefing``). This is the first
+    production Observation with real content behind it — RS-1's whole
+    purpose (see the RS-1 reconnaissance report).
+
+    The summary mirrors the same facts ``_display_recovery_briefing``
+    already prints, restated as one plain, factual, non-empty statement
+    — never assistant-voiced or interpretive prose.
+    ``RecoveryBriefing``'s own docstring is explicit that assembling
+    interpretation is Core work and out of scope here; this function
+    only restates the record so the Core can decide what it means
+    (docs/lifecycle.md, "User Briefings").
+
+    Every outcome — NONE, CLEAN, or UNCLEAN — is submitted at
+    ``Priority.NORMAL``. Termination state is preserved in the payload
+    rather than encoded as urgency: the Runtime does not get to decide
+    that a crash matters more than a clean run — the Core does, once it
+    receives the fact.
+
+    Args:
+        briefing: The RecoveryBriefing ``RuntimeLifecycle.start()`` produced.
+
+    Returns:
+        One Observation, ``ObservationSource.INTERNAL``,
+        ``Priority.NORMAL``, ``observation_type="recovery_briefing"``.
+    """
+    if briefing.is_new_installation:
+        summary = "New Runtime installation; no previous session to recover."
+    elif briefing.previous_termination == PreviousTermination.UNCLEAN:
+        last_state = (
+            briefing.previous_session.last_state
+            if briefing.previous_session is not None
+            else "unknown"
+        )
+        summary = (
+            f"Previous session did not shut down cleanly; "
+            f"last recorded state: {last_state}."
+        )
+    elif briefing.previous_termination == PreviousTermination.CLEAN:
+        summary = "Previous session ended cleanly."
+    else:
+        # PreviousTermination.NONE without is_new_installation: no
+        # InstallationRecord existed yet, but a prior session row was
+        # also absent — not a path start() actually produces today, but
+        # handled explicitly rather than falling through silently.
+        summary = "No previous session record was found."
+
+    if not briefing.is_new_installation and briefing.offline_seconds is not None:
+        summary += f" Offline for approximately {briefing.offline_seconds:.0f}s."
+
+    payload: dict[str, Any] = {
+        "previous_termination": briefing.previous_termination.value,
+        "previous_session": _session_record_payload(briefing.previous_session),
+        "offline_seconds": briefing.offline_seconds,
+        "is_new_installation": briefing.is_new_installation,
+    }
+
+    return Observation(
+        summary=summary,
+        observation_type="recovery_briefing",
+        source=ObservationSource.INTERNAL,
+        payload=payload,
+        intrinsic_priority=Priority.NORMAL,
+    )
 
 
 def build_runtime(config: TelemachusConfig) -> RuntimeLifecycle:
