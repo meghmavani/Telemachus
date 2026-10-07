@@ -13,7 +13,7 @@ Three architectural layers, per [docs/runtime.md](runtime.md):
 | Layer | Responsibility | Status |
 |---|---|---|
 | **Core** | Timeless intelligence — cognition, memory, governance, identity, communication | Implemented |
-| **Runtime** | Orchestration — lifecycle, scheduling, recovery, event routing, resource management | Partially implemented (Lifecycle only) |
+| **Runtime** | Orchestration — lifecycle, scheduling, recovery, event routing, resource management | Partially implemented (Lifecycle + EL-1 Event Loop intake; richer Event Loop stages, scheduling and plugins not started) |
 | **Plugins** | External system interfaces (GitHub, Gmail, Calendar, etc.) | Not started |
 
 Governing principles established in the Codex and ADRs (full register: [DECISIONS.md](DECISIONS.md)):
@@ -23,9 +23,19 @@ Governing principles established in the Codex and ADRs (full register: [DECISION
 
 ## Current Milestone
 
-**Runtime Lifecycle and Session Continuity.**
+**State Documentation Reconciliation** (this update). Committed milestone sequence on `main` (oldest first):
 
-Status: **implemented, tested, and validated — present in the working tree, not yet committed.** The last commit on `main` is `78cd2be` ("fix: handle Windows paths in CLI test fixtures"), which predates this milestone entirely. See [DEVELOPMENT_STATE.md](DEVELOPMENT_STATE.md) for the exact diff and file list.
+1. `a8464e8` Runtime Lifecycle and Session Continuity
+2. `58c3dc1` Core Execution + Trace Persistence (Stage 6, `PipelineTrace`)
+3. `7e01a91` Codex documentation: canonical Protected Constraints and authority hierarchy
+4. `4176e81` Codex Authority Layer (Constitution loaded from the Codex)
+5. `e6df65c` Constitutional action validation wired into Stage 6
+6. `c21bee3` Verified Tool capability envelope
+7. `3ece69c` EL-1: Runtime Tick + Observation Intake
+8. `63a421d` RS-1: Recovery Briefing fed into the Event Loop
+9. `00fc421` Observation provenance preserved in `PipelineTrace`
+
+There is no open implementation task. See [DEVELOPMENT_STATE.md](DEVELOPMENT_STATE.md).
 
 ## Implementation Status
 
@@ -38,47 +48,69 @@ Status: **implemented, tested, and validated — present in the working tree, no
 | Cognition — learning, reflection, evolution | **Implemented, Tested** | Wired; pipeline stages 8–10 |
 | Cognition — goals, projects, research | Implemented, Tested, **not reachable from production** | Constructed only inside their own unit tests |
 | Interaction — communication engine | **Implemented, Tested** | Wired in the CLI, but runs *after* the pipeline, not as pipeline stage 1 |
-| Tools (base, registry) | Implemented, Tested, **not reachable from production** | Pipeline's Execution stage is a stub — nothing ever calls the registry |
-| Configuration | **Implemented, Tested** | `[llm]` section was being silently dropped on load; fixed this session (see DECISIONS.md) |
-| Bootstrap (5-phase protocol) | **Implemented, Tested** | Runs correctly as one indivisible unit. Codex markdown files are existence-checked but never parsed — Constitution/Identity always come from hardcoded Python defaults. **Not established in repository** whether this is intentional or a gap. |
-| **Runtime / Lifecycle** | **Implemented, Tested — working tree, uncommitted** | State machine, `runtime.db` persistence, signal handling, recovery/reconciliation. Live-validated (see below). |
-| Event Loop | **Specified only** | `docs/event_loop.md` fully specifies it; no source exists |
+| Tools (base, registry) | **Implemented, Tested** | Reachable through pipeline Stage 6 via `wiring.build_tool_registry()`; the only registered tool is `EchoTool` (PASSIVE). `Tool.protected_constraints` is a typed, tool-declared set; it is **not verified** against what `execute()` does. No ACTIVE or AUTONOMOUS tool exists. |
+| Configuration | **Implemented, Tested** | `[llm]` section was previously dropped silently on load; fixed (see DECISIONS.md) |
+| Bootstrap (5-phase protocol) | **Implemented, Tested** | Runs as one indivisible unit. Phase 1 loads the Constitution from the Codex (`core/codex.py`): five Protected Constraints from `codex/philosophy/CONSTITUTION.md`, plus consistency checks on the Autonomy Charter, Ethical Boundary Engine and System Integration documents. A malformed Constitution fails Bootstrap; a missing document falls back softly. |
+| **Runtime / Lifecycle** | **Implemented, Tested** | State machine, `runtime.db` persistence, signal handling, recovery/reconciliation (committed at `a8464e8`). |
+| Event Loop (EL-1) | **Implemented, Tested** | `runtime/event_loop.py`, `runtime/observations.py`: bounded (1000) in-memory priority queue, FIFO within priority, one dispatch per tick, per-observation failure isolation, main-thread/synchronous, opaque Core invoker (`wiring.build_observation_invoker`). Creates no `ActionRequest`; executes no tool. Queue and `ProcessingContext` are in memory only. |
+| Runtime-originated observations (RS-1) | **Implemented, Tested** | `wiring.build_recovery_observation()`; `main.py start` submits one Recovery Observation per successful start at `Priority.NORMAL` for every termination classification. The **only** production Observation source. Result is `NO_ACTION`. |
+| Observation provenance | **Implemented, Tested** | `PipelineTrace.observation` (`ObservationProvenance`: `observation_id`, `observation_type`, `source`). Plain synchronous chat records none. |
+| Codex authority / constitutional gate | **Implemented, Tested** | Codex-derived `Constitution.validate_action()` runs in Stage 6 before the autonomy gate. Effective impact = `ActionRequest.affects` ∪ `Tool.protected_constraints`. |
 | LLM integration (router) | Implemented, Tested in isolation, **not integrated** | `llm/router.py` exists and is well-tested standalone-fashion, but is constructed nowhere in production and carries 0% coverage from the main suite |
 | Plugins | **Specified only** | `docs/runtime.md` names the concept; no source exists |
+| Event Loop stages beyond EL-1 (Signal Processor, Aggregation, dynamic priority, dependency/resource scheduling, deadlines, Runtime modes) | **Specified only** | `docs/event_loop.md`; no source exists, and there is no second Observation source to justify them |
 | Persistence (SQLite/WAL) | **Implemented, Tested** | `telemachus.db` (Core) and `runtime.db` (Runtime) are separate files, separate connections |
-| Scheduling / semantic readiness | **Specified only** | `docs/event_loop.md`; depends on the Event Loop |
-| Recovery | **Implemented, Tested** | Runtime-level session recovery and crash detection work end-to-end (live-validated). Core-level "recovery" (Bootstrap Phase 3, "Load Memory") is a read-only integrity check, not a restore of prior in-flight work — there is no in-flight work to restore without the Event Loop |
+| Scheduling / semantic readiness | **Specified only** | `docs/event_loop.md`. Only structural readiness (queue non-empty) exists. |
+| Recovery | **Implemented, Tested** | Runtime-level session recovery and crash detection work end-to-end. Core-level "recovery" (Bootstrap Phase 3, "Load Memory") is a read-only integrity check. Queued Observations are in memory only and are not replayed after a crash (reconciliation, not replay). |
 
 ## Current Validation
 
-Most recent run, this session, against the current (uncommitted) working tree:
+Most recent full run, at `00fc421` plus documentation-only changes:
 
 | Check | Result |
 |---|---|
-| `pytest` | **1166 passed**, 0 failed |
-| Coverage | 87% overall (4567 statements, 610 missed); new `runtime/` package alone: 96% |
+| `pytest` | **1375 passed**, 0 failed |
+| Coverage | 88% overall (5135 statements, 620 missed) |
 | `ruff check .` | All checks passed |
-| `mypy --strict src/` | Success, no issues, 43 source files |
-| `telemachus start` (live) | Reaches `RUNNING`; 5-phase bootstrap completes; lifecycle transitions logged correctly |
-| Clean shutdown (live) | Validated via a programmatic trigger — zero WAL/`-shm` sidecar files remain on either database afterward. **A real OS-delivered Ctrl+C could not be exercised in this execution environment** (isolated to a harness/console limitation via a minimal non-Telemachus repro, not a code defect) |
-| Crash recovery (live) | Validated via a real forced process kill + restart — correctly detected as `UNCLEAN`, briefing displayed, `Recovery → Reconciliation → Running` sequence correct |
+| `mypy --strict src/telemachus` | Success, no issues, 47 source files |
+
+Live validations (Runtime lifecycle, Event Loop, Recovery Observation including a simulated-crash restart detected as `UNCLEAN`) were performed in isolated temp directories at earlier milestones; they are not part of the automated suite. A real OS-delivered Ctrl+C has still not been exercised in the available environment (see DECISIONS.md, Q7).
 
 ## Immediate Next Step
 
-1. Review and commit the working-tree changes (Runtime Lifecycle milestone + the `[llm]` config fix). Nothing currently blocks this — all validation above is green.
-2. After that: the Event Loop (`docs/event_loop.md`) is the next architecture milestone. It has **not** been started. It was deliberately deferred until Lifecycle landed (see [DECISIONS.md](DECISIONS.md)).
+No implementation is in flight. The remaining Event Loop stages (Signal Processor, Aggregation, dynamic priority, dependency/resource scheduling, deadlines) currently have no real production input to act on. Generating an `ActionRequest` from an Observation is blocked on the unresolved items under "Action path" below and needs its own design pass first.
+
+## Action path
+
+**Implemented:**
+- The `ActionRequest` type exists (`core/types.py`).
+- Constitutional validation exists (`Constitution.validate_action()`), run before the autonomy gate in Stage 6.
+- The tool protected-capability floor exists: effective impact is `ActionRequest.affects` ∪ `Tool.protected_constraints`.
+- Stage 6 can reject actions (`DENIED_CONSTITUTION`, `DENIED_AUTONOMY`, `DENIED_TOOL`, ...) and its `ExecutionRecord` is persisted.
+
+**Not implemented / unresolved:**
+- No production code produces an `ActionRequest`; every Observation ends as `NO_ACTION`.
+- `ActionRequest.human_authorized` is declared by whoever constructs the request.
+- `ActionRequest.affects` is declared by whoever constructs the request.
+- `Tool.protected_constraints` declarations are not verified against `execute()` behaviour.
+- `AutonomyCharter.check_initiative()` exists but has no production caller and decides by free-text substring matching.
+- No domain is defined for Runtime-originated observations; the autonomy stage falls back to the `"research"` domain.
+- Observations enter the pipeline through the existing user-input-shaped path (summary passed as `user_input`) and are stored by Stage 7 as `pipeline_interaction` records.
+- Autonomy/action generation is intentionally deferred.
 
 ## Explicitly Not Yet Implemented
 
 Do not treat any of the following as complete:
 
-- Event Loop, Observation model, Processing Context, semantic readiness, priority/dependency/resource scheduling
+- Signal Processor, Observation aggregation, dynamic/effective priority, dependency analysis, resource/deadline scheduling, Runtime modes, periodic work
+- Any Observation source other than the startup Recovery Briefing
 - Plugins and the plugin manager
 - LLM router wired into the cognitive pipeline (the router itself exists; nothing calls it)
-- Pipeline stage 1 (Communication) and stage 6 (Execution) — both are stubs that pass through unconditionally
-- Actual parsing of Codex markdown into Constitution/Identity objects
+- Pipeline stage 1 (Communication) is a stub that passes through unconditionally
+- Generation of `ActionRequest`s; ACTIVE or AUTONOMOUS tools
+- Verification of tool protected-capability declarations against `execute()`
 - A single-instance guard for the Runtime (two concurrent processes sharing one `data_dir` will each misread the other's session as a crash)
 
 ## Last Updated
 
-2026-08-26
+2026-10-07

@@ -28,13 +28,13 @@ For deep architectural context beyond the index: `docs/runtime.md`, `docs/lifecy
 
 ## Current State
 
-Telemachus's Core (cognition, memory, governance, identity) is fully implemented and tested. A Runtime orchestration layer has just gained its first subsystem — Lifecycle and Session Continuity — implemented, tested, and live-validated, but **sitting uncommitted in the working tree**. The last commit on `main` is `78cd2be`, which predates the Runtime package entirely.
+Telemachus's Core (cognition, memory, governance, identity) is implemented and tested, with a Codex-derived Constitution gating Stage 6 execution. The Runtime has Lifecycle and Session Continuity plus EL-1 Event Loop intake: a bounded in-memory priority queue ticked once per second from `RuntimeLifecycle.wait_for_shutdown_request()`, dispatching to the Core through an opaque invoker. The only production Observation source is the startup Recovery Briefing (RS-1). `PipelineTrace` records Observation provenance. Nothing produces an `ActionRequest`, so every Observation ends as `NO_ACTION`. All of this is committed; HEAD at the time of writing is `00fc421`.
 
-**Before assuming anything about "current state," run `git status` and `git log --oneline -5`.** This file may be stale relative to the actual working tree if a commit, revert, or further changes happened after it was written.
+**Before assuming anything about "current state," run `git status` and `git log --oneline -5`.** This file may be stale relative to the actual working tree.
 
 ## Current Objective
 
-The Runtime Lifecycle and Session Continuity milestone is **complete**. There is no open implementation task right now. The next objective, once the working tree is committed, is the **Event Loop** (`docs/event_loop.md`) — not started.
+No open implementation task. The next milestone has not been selected; see [DEVELOPMENT_STATE.md § Next Milestone](DEVELOPMENT_STATE.md#next-milestone).
 
 ## What Has Already Been Decided
 
@@ -45,36 +45,38 @@ The Runtime Lifecycle and Session Continuity milestone is **complete**. There is
 - The Runtime persists to a **separate `runtime.db`**, never into `telemachus.db`.
 - `BootstrapProtocol`'s five phases run as **one indivisible unit**, invoked by the Runtime but never reordered, split, or duplicated by it.
 - First awakening triggers only when **both** the config permits it **and** the Runtime confirms this is a new installation — resolving a real bug where it used to re-trigger on every startup.
-- The Event Loop, Observations, scheduling, plugins, and LLM-router integration are all **deliberately out of scope** for what currently exists — do not treat any of them as started.
+- The Event Loop decides *when* reasoning occurs, never what it means; it must not read the Codex, call governance layers, create `ActionRequest`s or execute tools (enforced in part by `tests/test_runtime_boundaries.py`).
+- Event Loop stages beyond EL-1 (Signal Processor, Aggregation, dynamic priority, dependency/resource scheduling, deadlines), plugins, and LLM-router integration are **not started** — do not treat them as implemented.
+- Synchronous CLI chat stays synchronous and is not routed through the Event Loop.
 
 ## What Not To Do
 
-- Do not assume the Codex markdown files are parsed at runtime — they are not (see PROJECT_STATE.md).
+- Do not assume tool protected-capability declarations are verified against `execute()` — they are only type-checked.
+- Do not assume an `ActionRequest` producer exists — none does; see PROJECT_STATE.md § Action path.
 - Do not assume `llm/router.py` is reachable from the pipeline — it is not.
-- Do not assume `tools/`, `cognition/{goals,projects,research}`, or `memory/{index,retrieval,versioning}` run in production — they don't; they're tested in isolation only.
-- Do not build Event Loop / scheduling / plugin behavior into the Runtime Lifecycle code as a "quick addition" — that boundary was deliberate (see DECISIONS.md, Future Milestones in DEVELOPMENT_STATE.md).
+- Do not assume `cognition/{goals,projects,research}` or `memory/{index,retrieval,versioning}` run in production — they don't; they're tested in isolation only.
+- Do not add Event Loop / scheduling / plugin behavior to the Runtime Lifecycle code as a "quick addition" — the Event Loop lives in `runtime/event_loop.py` and is attached through `RuntimeLifecycle.attach_event_loop()`.
 - Do not treat the interactive `chat` Ctrl+C behavior change as fixed — it's a known, documented, *unresolved* regression (DECISIONS.md, Q6).
 - Do not silently resolve any item listed under DECISIONS.md's "Open Questions" — surface it instead.
 
 ## Current Validation
 
 ```
-pytest:            1166 passed, 0 failed
-coverage:           87% overall; runtime/ package: 96%
-ruff check .:        All checks passed
-mypy --strict src/:  Success, 43 files, no issues
+pytest:                       1375 passed, 0 failed
+coverage:                      88% overall
+ruff check .:                  All checks passed
+mypy --strict src/telemachus:  Success, 47 files, no issues
 ```
 
-Live-validated this session: `telemachus start` → `RUNNING`; forced-kill + restart → correctly detected `UNCLEAN` → `Recovery → Reconciliation → Running`; clean shutdown → zero WAL/`-shm` sidecars remaining on either database. Full detail: [DEVELOPMENT_STATE.md § Validation Baseline](DEVELOPMENT_STATE.md#validation-baseline).
+Full detail: [DEVELOPMENT_STATE.md § Validation Baseline](DEVELOPMENT_STATE.md#validation-baseline).
 
 **These numbers are a snapshot.** If the working tree has changed since this file's "Last Updated" date, re-run the checks before trusting them.
 
 ## Next Action
 
-1. Confirm the working tree still matches this snapshot (`git status`, `git diff --stat`).
-2. If it matches: review and commit the Runtime Lifecycle milestone + the `[llm]` config fix.
-3. If it doesn't match (further work has happened, or the tree was reset): re-derive state from `git log` and the actual source tree before trusting anything else in this file.
-4. Only after that: begin scoping the Event Loop milestone, starting from `docs/event_loop.md` and the "Future Milestones" ordering in [DEVELOPMENT_STATE.md](DEVELOPMENT_STATE.md).
+1. Confirm the working tree matches this snapshot (`git status`, `git log --oneline -5`).
+2. If it does not, re-derive state from `git log` and the source tree before trusting anything else here.
+3. Choose the next milestone from the repository's current state; do not default to the older Event Loop ordering.
 
 ## If Something Is Ambiguous
 
@@ -82,4 +84,4 @@ Stop and ask, rather than inventing architecture. In particular: if a specificat
 
 ## Last Updated
 
-2026-08-26
+2026-10-07
