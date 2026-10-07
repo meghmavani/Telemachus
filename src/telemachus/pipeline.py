@@ -44,6 +44,7 @@ from telemachus.core.types import (
     ExecutionOutcome,
     ExecutionRecord,
     MemoryDomain,
+    ObservationProvenance,
     PipelineContext,
     PipelineResult,
     PipelineStage,
@@ -89,6 +90,7 @@ class _TraceBuilder:
     blocked_at: PipelineStage | None = None
     blocked_reason: str = ""
     execution: ExecutionRecord | None = None
+    observation: ObservationProvenance | None = None
 
     def add_stage(self, record: StageRecord) -> None:
         """Append a stage's result to the trace."""
@@ -112,7 +114,31 @@ class _TraceBuilder:
             blocked_at=self.blocked_at,
             blocked_reason=self.blocked_reason,
             execution=self.execution,
+            observation=self.observation,
         )
+
+
+def _extract_observation_provenance(ctx: dict[str, Any]) -> ObservationProvenance | None:
+    """Read Observation identity from ``ctx["observation"]``, if present.
+
+    Provenance only: nothing downstream branches on the result. Returns
+    None when no Observation drove this run, or when the supplied value
+    is not a well-formed observation mapping (logged, never raised — a
+    malformed hint must not change pipeline behaviour).
+    """
+    raw = ctx.get("observation")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        fields = (raw.get("observation_id"), raw.get("observation_type"), raw.get("source"))
+        if all(isinstance(f, str) and f for f in fields):
+            return ObservationProvenance(
+                observation_id=str(fields[0]),
+                observation_type=str(fields[1]),
+                source=str(fields[2]),
+            )
+    logger.warning("Ignoring malformed observation context; no provenance recorded")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +210,15 @@ def _trace_to_dict(trace: PipelineTrace) -> dict[str, Any]:
         "blocked_reason": trace.blocked_reason,
         "execution": (
             _execution_record_to_dict(trace.execution) if trace.execution else None
+        ),
+        "observation": (
+            {
+                "observation_id": trace.observation.observation_id,
+                "observation_type": trace.observation.observation_type,
+                "source": trace.observation.source,
+            }
+            if trace.observation
+            else None
         ),
     }
 
@@ -354,6 +389,7 @@ class CognitivePipeline:
             trace_id=str(uuid.uuid4()),
             session_id=session_id,
             started_at=time.time(),
+            observation=_extract_observation_provenance(ctx),
         )
 
         # Build the pipeline context

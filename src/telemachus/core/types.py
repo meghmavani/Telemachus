@@ -334,6 +334,25 @@ class StageRecord:
 
 
 @dataclass(frozen=True)
+class ObservationProvenance:
+    """Identity of the Runtime Observation a pipeline run was invoked for.
+
+    Identity only — the Observation itself remains the source of truth and
+    is never copied into the trace. Absent (``PipelineTrace.observation is
+    None``) for any run not driven by an Observation, e.g. synchronous chat.
+
+    Attributes:
+        observation_id: The originating Observation's identifier.
+        observation_type: Its category label.
+        source: Its origin, as the canonical string value.
+    """
+
+    observation_id: str
+    observation_type: str
+    source: str
+
+
+@dataclass(frozen=True)
 class PipelineTrace:
     """A complete, persistable record of one pipeline run.
 
@@ -348,6 +367,8 @@ class PipelineTrace:
         blocked_at: Which stage blocked the pipeline, if any.
         blocked_reason: Why it blocked, if ``blocked_at`` is set.
         execution: The Stage 6 ExecutionRecord, if execution ran.
+        observation: Provenance of the Observation that triggered this
+            run, or None if the run was not Observation-driven.
     """
 
     trace_id: str
@@ -359,3 +380,4 @@ class PipelineTrace:
     blocked_at: PipelineStage | None = None
     blocked_reason: str = ""
     execution: ExecutionRecord | None = None
+    observation: ObservationProvenance | None = None
