@@ -387,7 +387,9 @@ class TestAuthorityBoundary:
         offenders = [
             str(p.relative_to(SRC_ROOT))
             for p in sorted(SRC_ROOT.rglob("*.py"))
-            if p.name != "grant_ledger.py"
+            # grant_verifier.py is the ledger's governance-layer consumer,
+            # not a production call site (pipeline/runtime/CLI).
+            if p.name not in ("grant_ledger.py", "grant_verifier.py")
             and "grant_ledger" in p.read_text(encoding="utf-8")
         ]
         assert not offenders
