@@ -171,18 +171,20 @@ class TestEffectiveConstitutionalImpact:
         assert record.outcome == ExecutionOutcome.DENIED_CONSTITUTION
         assert record.violated_constraints == ("resource_authorization",)
 
-    def test_authorized_tool_declared_action_reaches_downstream(
+    def test_legacy_authorized_tool_declared_action_is_denied(
         self, authorized_pipeline: CognitivePipeline
     ) -> None:
-        """human_authorized=True clears the constitutional gate and the
-        action actually executes — proving PERMITTED still falls through."""
+        """Changed expectation (legacy-boolean neutralization): this used
+        to execute because ``human_authorized=True`` produced PERMITTED.
+        The tool's declared P4 impact must now be denied regardless."""
         result = authorized_pipeline.process(
             "say hello",
             context={"action": _action("resource_tool", human_authorized=True)},
         )
         record = result.metadata["execution"]
-        assert record.outcome == ExecutionOutcome.SUCCEEDED
-        assert record.output == "resource action performed"
+        assert record.outcome == ExecutionOutcome.DENIED_CONSTITUTION
+        assert record.violated_constraints == ("resource_authorization",)
+        assert record.output is None
 
     def test_tool_with_no_declared_constraints_is_unaffected(
         self, authorized_pipeline: CognitivePipeline

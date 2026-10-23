@@ -176,14 +176,22 @@ class TestValidateAction:
         assert assessment.verdict == ConstitutionalVerdict.AUTHORITY_UNAVAILABLE
         assert assessment.violated == (ProtectedConstraint.RESOURCE_AUTHORIZATION,)
 
-    def test_authorized_protected_action_is_permitted(self, real_constitution: Any) -> None:
+    def test_legacy_human_authorized_flag_is_not_permission(
+        self, real_constitution: Any
+    ) -> None:
+        """Changed expectation (legacy-boolean neutralization): a
+        caller-declared ``human_authorized=True`` used to yield PERMITTED.
+        Any producer can set it, so it no longer confers permission."""
         action = ActionRequest(
             tool="echo",
             affects=frozenset({ProtectedConstraint.RESOURCE_AUTHORIZATION}),
             human_authorized=True,
         )
         assessment = real_constitution.validate_action(action)
-        assert assessment.verdict == ConstitutionalVerdict.PERMITTED
+        assert assessment.verdict == ConstitutionalVerdict.VIOLATION
+        assert assessment.violated == (ProtectedConstraint.RESOURCE_AUTHORIZATION,)
+        assert "human_authorized" in assessment.reasoning
+        assert "not accepted" in assessment.reasoning
 
     @pytest.mark.parametrize(
         "constraint",
@@ -563,11 +571,13 @@ class TestCompatibility:
         result = authorized_pipeline.process("say hello", context={})
         assert result.metadata["execution"].outcome == ExecutionOutcome.NO_ACTION
 
-    def test_authorized_protected_action_reaches_downstream_gates(
+    def test_legacy_authorized_protected_action_is_denied(
         self, authorized_pipeline: CognitivePipeline
     ) -> None:
-        """PERMITTED must fall through to the existing autonomy/tool
-        gates unchanged, and actually execute."""
+        """Changed expectation (legacy-boolean neutralization): this used
+        to execute because ``human_authorized=True`` produced PERMITTED.
+        It must now stop at the constitutional gate even though autonomy
+        would allow it."""
         result = authorized_pipeline.process(
             "say hello",
             context={
@@ -579,7 +589,9 @@ class TestCompatibility:
                 )
             },
         )
-        assert result.metadata["execution"].outcome == ExecutionOutcome.SUCCEEDED
+        record = result.metadata["execution"]
+        assert record.outcome == ExecutionOutcome.DENIED_CONSTITUTION
+        assert record.violated_constraints == ("resource_authorization",)
 
     def test_unprotected_action_unaffected_by_constitutional_gate(
         self, authorized_pipeline: CognitivePipeline
@@ -588,3 +600,136 @@ class TestCompatibility:
             "say hello", context={"action": _action("echo", text="hi")}
         )
         assert result.metadata["execution"].outcome == ExecutionOutcome.SUCCEEDED
+
+
+# ---------------------------------------------------------------------------
+# Legacy human_authorized neutralization
+# ---------------------------------------------------------------------------
+
+
+class _SpyTool(Tool):
+    """Records whether execute() ran; declares nothing itself."""
+
+    def __init__(self) -> None:
+        super().__init__(name="spy", description="Spy.", category=ToolCategory.PASSIVE)
+        self.executed = False
+
+    def validate(self, **kwargs: Any) -> bool:
+        return True
+
+    def execute(self, **kwargs: Any) -> ToolResult:
+        self.executed = True
+        return ToolResult.ok(output="ran")
+
+
+_IMPACT_COMBINATIONS = [
+    frozenset({ProtectedConstraint.CONSTITUTION_INTEGRITY}),
+    frozenset({ProtectedConstraint.HUMAN_AUTHORITY_LIFE_IMPACTING}),
+    frozenset({ProtectedConstraint.HUMAN_MEANING, ProtectedConstraint.RELATIONSHIP_INTEGRITY}),
+    frozenset(ProtectedConstraint),
+]
+
+
+class TestLegacyHumanAuthorizedNeutralized:
+    @pytest.mark.parametrize("human_authorized", [True, False])
+    @pytest.mark.parametrize(
+        "impact", _IMPACT_COMBINATIONS, ids=["P1", "P5", "P2+P3", "all"]
+    )
+    def test_non_empty_impact_is_never_permitted(
+        self,
+        real_constitution: Any,
+        impact: frozenset[ProtectedConstraint],
+        human_authorized: bool,
+    ) -> None:
+        action = ActionRequest(tool="echo", affects=impact, human_authorized=human_authorized)
+        assessment = real_constitution.validate_action(action)
+        assert assessment.verdict == ConstitutionalVerdict.VIOLATION
+        assert set(assessment.violated) == set(impact)
+        assert "human_authorized" in assessment.reasoning
+
+    @pytest.mark.parametrize("human_authorized", [True, False])
+    def test_empty_impact_still_not_applicable(
+        self, real_constitution: Any, human_authorized: bool
+    ) -> None:
+        action = ActionRequest(tool="echo", human_authorized=human_authorized)
+        assert (
+            real_constitution.validate_action(action).verdict
+            == ConstitutionalVerdict.NOT_APPLICABLE
+        )
+
+    @pytest.mark.parametrize("human_authorized", [True, False])
+    def test_missing_authority_still_unavailable(self, human_authorized: bool) -> None:
+        from telemachus.core.constitution import create_default_constitution
+
+        action = ActionRequest(
+            tool="echo",
+            affects=frozenset({ProtectedConstraint.HUMAN_MEANING}),
+            human_authorized=human_authorized,
+        )
+        assessment = create_default_constitution().validate_action(action)
+        assert assessment.verdict == ConstitutionalVerdict.AUTHORITY_UNAVAILABLE
+
+    def test_stage_6_cannot_be_bypassed_with_legacy_flag(self, real_constitution: Any) -> None:
+        """Maximum trust, a permissive tool, and human_authorized=True:
+        the constitutional gate must still stop it before execution."""
+        spy = _SpyTool()
+        registry = ToolRegistry()
+        registry.register(spy)
+        pipeline = CognitivePipeline(tool_registry=registry, constitution=real_constitution)
+        pipeline.autonomy_charter.set_domain_trust("research", 1.0)
+
+        result = pipeline.process(
+            "say hello",
+            context={
+                "action": ActionRequest(
+                    tool="spy",
+                    affects=frozenset({ProtectedConstraint.RESOURCE_AUTHORIZATION}),
+                    human_authorized=True,
+                )
+            },
+        )
+        record = result.metadata["execution"]
+        assert record.outcome == ExecutionOutcome.DENIED_CONSTITUTION
+        assert "human_authorized" in (record.error or "")
+        assert spy.executed is False
+
+    def test_grant_verifier_is_not_an_alternative_permission_path(
+        self, real_constitution: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from telemachus.governance.grant_ledger import GrantLedger
+        from telemachus.governance.grant_verifier import GrantVerifier
+
+        def _forbidden(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("grant verification reached from the action path")
+
+        monkeypatch.setattr(GrantVerifier, "verify_and_consume", _forbidden)
+        monkeypatch.setattr(GrantLedger, "get", _forbidden)
+        monkeypatch.setattr(GrantLedger, "consume", _forbidden)
+
+        pipeline = CognitivePipeline(tool_registry=_registry(), constitution=real_constitution)
+        pipeline.autonomy_charter.set_domain_trust("research", 1.0)
+        result = pipeline.process(
+            "say hello",
+            context={
+                "action": ActionRequest(
+                    tool="echo",
+                    arguments={"text": "hi"},
+                    affects=frozenset({ProtectedConstraint.HUMAN_MEANING}),
+                    human_authorized=True,
+                )
+            },
+        )
+        assert result.metadata["execution"].outcome == ExecutionOutcome.DENIED_CONSTITUTION
+
+    def test_no_production_source_reads_human_authorized_as_permission(self) -> None:
+        src = Path(__file__).resolve().parents[1] / "src" / "telemachus"
+        readers = [
+            p.relative_to(src).as_posix()
+            for p in sorted(src.rglob("*.py"))
+            if p.name != "types.py"  # the field's own definition
+            and ".human_authorized" in p.read_text(encoding="utf-8")
+        ]
+        # constitution.py mentions it only in documentation, never as a branch.
+        assert readers in ([], ["core/constitution.py"])
+        source = (src / "core" / "constitution.py").read_text(encoding="utf-8")
+        assert "if action.human_authorized" not in source

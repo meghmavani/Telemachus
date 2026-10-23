@@ -142,9 +142,8 @@ class Constitution:
         (codex/SYSTEM_INTEGRATION.md, "Conflict Resolution Hierarchy").
 
         The caller declares which Protected Constraints an action
-        touches via ``action.affects`` and whether a human has
-        authorized it via ``action.human_authorized``. This method never
-        infers either from ``action.tool``, ``action.arguments``, or
+        touches via ``action.affects``. This method never infers impact
+        from ``action.tool``, ``action.arguments``, or
         ``action.description`` — no keyword matching, no NLP. An action
         that declares no affected constraint is not evaluated against
         the Constitution at all; it is ``NOT_APPLICABLE``, and downstream
@@ -157,8 +156,16 @@ class Constitution:
                loaded) -> AUTHORITY_UNAVAILABLE. Fails closed: a
                protected action can never proceed merely because no
                Constitution was loaded.
-            3. ``action.human_authorized`` -> PERMITTED.
-            4. Otherwise -> VIOLATION.
+            3. Otherwise -> VIOLATION.
+
+        ``action.human_authorized`` is deliberately ignored. It is a
+        caller-declared boolean, so any producer could set it; it is not
+        accepted as authorization evidence (GOV-ADR-001). Until a trusted
+        authorization mechanism exists — an authenticated human issuer
+        and approval surface, which this repository does not yet have —
+        no action with a non-empty impact can be ``PERMITTED``. The
+        grant verifier is not consulted here either: it does not
+        authenticate an issuer.
 
         Args:
             action: The ActionRequest to validate.
@@ -183,9 +190,6 @@ class Constitution:
                 ),
             )
 
-        if action.human_authorized:
-            return ConstitutionalAssessment(verdict=ConstitutionalVerdict.PERMITTED)
-
         # protected_constraints is all-or-nothing (parse_protected_constraints
         # requires exactly the five canonical entries), so every constraint in
         # `violated` is guaranteed to have a definition here.
@@ -197,7 +201,11 @@ class Constitution:
         return ConstitutionalAssessment(
             verdict=ConstitutionalVerdict.VIOLATION,
             violated=violated,
-            reasoning=f"Action touches Protected Constraint(s) without authorization — {details}",
+            reasoning=(
+                "Action touches Protected Constraint(s) and no accepted "
+                "authorization evidence exists; the legacy human_authorized "
+                f"flag is not accepted as authorization — {details}"
+            ),
         )
 
 
