@@ -6,6 +6,7 @@ and provides a frozen configuration object for the entire application.
 
 from __future__ import annotations
 
+import re
 import sys
 import tomllib
 from dataclasses import dataclass, field, replace
@@ -150,6 +151,19 @@ class LLMConfig:
 
 
 @dataclass(frozen=True)
+class AuthorizationConfig:
+    """Human-authorization policy configuration.
+
+    Attributes:
+        operator_sid: Windows SID of the account explicitly pinned as the
+            authorized operator. Empty means no operator is pinned. It is
+            never filled in automatically from the running account.
+    """
+
+    operator_sid: str = ""
+
+
+@dataclass(frozen=True)
 class TelemachusConfig:
     """Root configuration for the Telemachus system."""
 
@@ -163,6 +177,7 @@ class TelemachusConfig:
     communication: CommunicationConfig = field(default_factory=CommunicationConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    authorization: AuthorizationConfig = field(default_factory=AuthorizationConfig)
 
     def with_log_level(self, level: str) -> TelemachusConfig:
         """Return a new config with the logging level overridden.
@@ -335,11 +350,30 @@ def _resolve_paths(config: TelemachusConfig) -> TelemachusConfig:
         communication=config.communication,
         memory=config.memory,
         llm=config.llm,
+        authorization=config.authorization,
     )
+
+
+# Syntax check for authorization.operator_sid. Mirrors
+# telemachus.governance.operator.is_well_formed_sid (which re-validates at
+# use); kept here so config loading does not import the governance package.
+_SID_RE = re.compile(r"^S-1-(0|[1-9][0-9]*)((?:-(?:0|[1-9][0-9]*)){1,15})$")
+
+
+def _is_well_formed_sid(value: str) -> bool:
+    match = _SID_RE.match(value)
+    if match is None or int(match.group(1)) > 2**48 - 1:
+        return False
+    return all(int(part) <= 2**32 - 1 for part in match.group(2)[1:].split("-"))
 
 
 def _validate_config(config: TelemachusConfig) -> None:
     """Validate configuration values and raise ConfigError on invalid values."""
+    operator_sid = config.authorization.operator_sid
+    if operator_sid.strip() and not _is_well_formed_sid(operator_sid):
+        raise ConfigError(
+            f"[authorization] operator_sid is not a well-formed Windows SID: {operator_sid!r}"
+        )
     if config.governance.default_autonomy_level not in range(5):
         raise ConfigError(
             f"default_autonomy_level must be 0-4, got {config.governance.default_autonomy_level}"
@@ -410,6 +444,7 @@ def load_config_from_path(config_path: str | Path | None = None) -> TelemachusCo
     communication_raw = _find_section(data, "communication", {})
     memory_raw = _find_section(data, "memory", {})
     llm_raw = _find_section(data, "llm", {})
+    authorization_raw = _find_section(data, "authorization", {})
 
     config = TelemachusConfig(
         identity=IdentityConfig(
@@ -474,6 +509,11 @@ def load_config_from_path(config_path: str | Path | None = None) -> TelemachusCo
             auto_index=_as_bool(memory_raw, "auto_index", True, table="memory"),
         ),
         llm=_parse_llm(llm_raw),
+        authorization=AuthorizationConfig(
+            operator_sid=_as_str(
+                authorization_raw, "operator_sid", "", table="authorization"
+            ),
+        ),
     )
 
     config = _resolve_paths(config)
