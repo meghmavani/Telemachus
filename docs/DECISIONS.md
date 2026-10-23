@@ -17,6 +17,83 @@
 | ADR-009 | Graceful Degradation — aggregate/batch/delay/throttle before discarding | Approved | Resilience over catastrophic failure | Partially — the LLM router's fall-through/cooldown design follows this principle, but the router itself is unwired; Runtime shutdown degrades independently per resource (memory store failing to close doesn't block the rest of shutdown) |
 | ADR-010 | Immutable Architectural History — accepted ADRs are never rewritten, only superseded | Approved | Preserve architectural intent over time | Process decision, not a code decision — followed by not editing this file's ADR table content, only adding to it |
 
+## Governance Decisions (Authority ADRs)
+
+The Runtime ADRs above (ADR-001 to ADR-010) live in `docs/runtime_decisions.md` and stay focused on the Runtime. Decisions about *authority* — who may permit an action — are governance decisions and are recorded here, in this register, with the same structure. Identifiers use a `GOV-ADR-` prefix so they cannot be confused with Runtime ADRs.
+
+### GOV-ADR-001: Proposal → Authorization → Request (PAR)
+
+**Status**
+
+Accepted as the **target architecture**. **Nothing in this ADR is implemented.** Section "Current implementation" states what exists today; everything under "Decision" describes a future state.
+
+**Date**
+
+2026-10-07
+
+**Context**
+
+Current implementation (verified against the repository):
+
+- `ActionRequest` (`core/types.py`) carries `tool`, `arguments`, `description`, `affects: frozenset[ProtectedConstraint]` and `human_authorized: bool`. No production code constructs one; every Observation ends at Stage 6 as `NO_ACTION`.
+- `Constitution.validate_action()` (`core/constitution.py`) returns `NOT_APPLICABLE` when the effective impact is empty, `AUTHORITY_UNAVAILABLE` when no Codex-derived constraints are loaded, `PERMITTED` when `human_authorized` is true, and `VIOLATION` otherwise.
+- Effective impact is `action.affects | tool.protected_constraints` (`pipeline.py: _execute_action()`). Tool declarations are typed but not verified against `execute()`.
+- Stages 2–5 evaluate the input *text*; Stage 6 executes `ctx["action"]`. Governance is therefore not bound to the action that runs.
+- `human_authorized` is a boolean set by whoever builds the request, and `PERMITTED` applies to every declared constraint at once. An autonomous producer could set it.
+- `AutonomyCharter.check_initiative()` has no production caller and decides by free-text substring matching.
+
+This is acceptable only because no producer exists. It is not an authority model for autonomous action.
+
+**Decision**
+
+Record PAR as the target architecture for any future `ActionRequest` generation from internal reasoning.
+
+1. **Reasoning is not authorization.** Core may reason about an action. Reasoning does not authorize it and is not sufficient to construct an executable `ActionRequest`.
+2. **Proposal.** The Decision stage will eventually emit an untrusted `ActionProposal`, conceptually containing: proposed tool, arguments, rationale, *claimed* Protected Constraint impact, structured origin (user turn vs. internal Observation) and provenance. A proposal is never executable.
+3. **Authorization is separate from reasoning.** Human authorization must come from a genuine human interaction or approval surface. It must not be derived from Core reasoning, Observation content, proposal fields, caller-controlled context, keyword detection, or an autonomous producer setting a boolean. The target representation is a verifiable **AuthorizationGrant**, bound to the exact action approved, with: per-Protected-Constraint scope; binding to the exact tool, arguments and effective impact; an identifiable issuer; issuance time; and expiry and/or single-use semantics.
+4. **System authority is distinct from human authorization.** The target architecture permits system (autonomous) authority only where the *effective* Protected Constraint impact is empty. Any non-empty effective impact requires a human grant.
+5. **Action Authority.** A future governed Action Authority component, on the Core/governance side and **not** in the Runtime, will: receive an untrusted proposal; receive applicable authorization; compute effective impact; incorporate verified tool capability information; construct the executable `ActionRequest`; and attach authorization *evidence* in place of a caller-controlled `human_authorized` boolean.
+6. **Constitutional validation remains normative.** `Constitution.validate_action()` stays the Protected Constraint validator. The intended future semantic change is that `human_authorized: bool` must not remain the authority primitive for autonomous execution; it is to be replaced by verifiable authorization evidence. This is a future change, not part of this ADR's implementation.
+7. **Capability floor, not assurance.** `action.affects | tool.protected_constraints` is currently only a capability *floor*. Autonomous execution will require stronger assurance that declared capabilities correspond to actual tool behaviour, including argument-sensitive impact where necessary.
+8. **Initiative stays an autonomy-layer concept**, distinct from constitutional impact. `AutonomyCharter.check_initiative()` in its current free-text keyword form is not an acceptable authority mechanism. It is not redesigned by this ADR.
+9. **Runtime and Event Loop boundary is preserved.** The Runtime does not grant authority. The Event Loop does not authorize actions, construct `ActionRequest`s or execute tools. Internal Observations do not constitute human authorization. Synchronous chat remains synchronous.
+
+**Intended provenance chain (target)**
+
+`Observation/session → PipelineTrace → ActionProposal → AuthorizationGrant → ActionRequest → ExecutionRecord`
+
+The existing Observation provenance (`PipelineTrace.observation`, `ObservationProvenance`) is a prerequisite for this chain and is the only part that exists. The full proposal/grant/request trace schema is deferred to later implementation; `PipelineTrace` and `ExecutionRecord` are not changed by this ADR.
+
+**Rationale**
+
+- Producing a request and permitting it must be different authorities, or an autonomous producer can authorize itself.
+- No constitutional decision should depend on free-text keyword inference; Protected Constraint impact should be represented structurally.
+- Tool declarations are not trustworthy merely because they are typed.
+- Human approval is asynchronous with respect to the run that proposes the action, so the link between proposal, grant and execution must be explicit rather than co-located in one trace.
+
+**Consequences**
+
+- A future `ActionProposal` type, `AuthorizationGrant` type and Action Authority component are required, along with a grant issuer on a human-facing surface. None exists.
+- `Constitution.validate_action()` will eventually need to evaluate grants instead of a boolean.
+- Risk, ethics and autonomy evaluation will eventually need to be bound to the proposed action rather than the input text.
+- Keyword- and context-flag-based *grants* in the autonomy layer (emergency, maintenance, consent, domain) cannot serve as authority for protected actions.
+- Tool capability attestation becomes a prerequisite for any ACTIVE or AUTONOMOUS tool.
+- Pending proposals awaiting approval will eventually need persistence; no design for it exists.
+
+**Implementation References**
+
+Current state only: `core/types.py: ActionRequest`, `core/constitution.py: validate_action()`, `pipeline.py: _execute_action()`, `tools/base.py: Tool.protected_constraints`, `governance/autonomy.py: AutonomyCharter.check_initiative()`. None implements PAR.
+
+Binding semantics only (no authority, persistence, issuer or verification): `governance/authorization.py` — `AuthorizationGrant` record type, `compute_action_digest()` canonical exact-action binding, `scope_covers()`, `is_within_validity_window()`. Not consulted by the Constitution, Stage 6 or the tool registry.
+
+**Related**
+
+ADR-001 (Runtime coordinates, Core reasons), Q8–Q17 below, `codex/philosophy/CONSTITUTION.md` (Protected Constraints), `codex/operations/AUTONOMY_CHARTER.md` (Initiative Rule).
+
+**Annotations**
+
+The Codex states that Protected Constraints require "explicit approval" or "appropriate discussion/authorization" and that certain decisions must "remain human-controlled". It does not define who may give that approval, how the human is identified, or through which surface. This ADR deliberately does **not** supply those definitions. They are unresolved policy questions requiring an explicit human decision, and may require a Codex amendment; no Codex change is made or implied here.
+
 ## Implementation Decisions (Runtime Lifecycle milestone, not formal ADRs)
 
 These are real, load-bearing facts about the current codebase. They resolve ambiguity ADR-001/002 left open at the implementation level.
@@ -60,8 +137,13 @@ Not established in repository. Do not silently resolve these — surface them if
 | Q5 | **Resolved in part.** Asked whether Codex markdown is meant to be parsed at runtime. The Codex Authority Layer answers this for the Constitution: Protected Constraints, the First Memory and the scoped Identity fields are loaded from the Codex (`core/codex.py`, `bootstrap.py`). Residual: the Core Principles list in `create_constitution_from_codex()` is still the Python factory's list, and `create_default_constitution()`/`create_default_identity()` remain as fallbacks when a Codex document is missing. | Whether those remaining Python-defined values should also come from the Codex is not decided here. |
 | Q6 | Interactive `chat`'s Ctrl+C behavior changed: the Runtime's signal handler intercepts SIGINT before Python's default `KeyboardInterrupt` can, and since the handler never raises, it cannot unblock a synchronous `input()` call the REPL is waiting on. | The memory store still closes correctly (via a `finally` block), but Ctrl+C no longer interrupts an in-progress prompt the way it did before this milestone. Not resolved; documented as a known regression, not fixed, since a proper fix is Event-Loop-shaped work. |
 | Q7 | Whether real OS-delivered Ctrl+C reaches the Runtime's installed handler in the actual deployment environment could not be verified in the environment used to build this milestone (isolated to a console-attachment limitation of that specific harness via a minimal, non-Telemachus repro). | The handler *contract* is fully tested (Event set → graceful shutdown completes); only genuine OS signal delivery is unverified here. |
-| Q8 | Who may create an `ActionRequest`. No production code does today. | Deferred to a later architecture/design milestone. |
-| Q9 | Who is authoritative for `ActionRequest.human_authorized`. It is currently set by whoever constructs the request, and `Constitution.validate_action()` returns `PERMITTED` when it is true. | Deferred. |
-| Q10 | How producer-declared `ActionRequest.affects` and tool-declared `protected_constraints` should ultimately be trusted or verified. Today they are type-checked, not verified against behaviour. | Deferred. |
-| Q11 | Redesign of `AutonomyCharter.check_initiative()`: it has no production caller and decides by free-text substring matching. | Deferred. |
+| Q8 | Who may create an `ActionRequest`. No production code does today. | Target direction recorded in GOV-ADR-001 (a governed Action Authority builds it from an untrusted proposal plus authorization). Not implemented. |
+| Q9 | Who is authoritative for `ActionRequest.human_authorized`. It is currently set by whoever constructs the request, and `Constitution.validate_action()` returns `PERMITTED` when it is true. | Target direction recorded in GOV-ADR-001 (replace the boolean with verifiable authorization evidence). Not implemented; the issuer questions Q13–Q17 remain open. |
+| Q10 | How producer-declared `ActionRequest.affects` and tool-declared `protected_constraints` should ultimately be trusted or verified. Today they are type-checked, not verified against behaviour. | Open. GOV-ADR-001 records that the union is only a capability floor and that autonomous execution needs stronger assurance (including argument-sensitive impact); the mechanism (static, dynamic or other attestation) is undecided. GOV-ADR-001 makes it a prerequisite for any ACTIVE or AUTONOMOUS tool; that tool architecture itself remains open (Q12). |
+| Q11 | Redesign of `AutonomyCharter.check_initiative()`: it has no production caller and decides by free-text substring matching. | Open. GOV-ADR-001 records that the current keyword form is not an acceptable authority mechanism and that initiative stays an autonomy-layer concept; the redesign and its structured inputs are not decided. |
 | Q12 | The autonomy domain for Runtime-originated Observations is undefined (the autonomy stage falls back to `"research"`), and Observations enter the pipeline as user-input-shaped text. Also deferred: autonomous `ActionRequest` generation, the ACTIVE/AUTONOMOUS tool architecture, and the later Event Loop semantic stages (Signal Processor, Aggregation, dynamic priority, dependency/resource scheduling). | Deferred. |
+| Q13 | What exactly constitutes "explicit approval" under the Codex (`CONSTITUTION.md`, Protected Constraints 1 and 4; `AUTONOMY_CHARTER.md`)? | Unresolved policy/Codex question requiring a human decision. GOV-ADR-001 does not define it. |
+| Q14 | Who is an authorized human grantor? | Unresolved; requires a human decision. |
+| Q15 | How is the human issuer identified and authenticated? | Unresolved; requires a human decision. |
+| Q16 | Which approval surface(s) may issue grants (CLI, a future channel, other)? | Unresolved. Observation content and Runtime components are excluded by GOV-ADR-001, but no positive list exists. |
+| Q17 | What persistence guarantees are required for grant replay prevention (single-use and expiry bookkeeping), and where is that state kept? | Unresolved. No design exists; no `runtime.db` or `telemachus.db` change is implied. |
