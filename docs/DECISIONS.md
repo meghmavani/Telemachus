@@ -25,7 +25,7 @@ The Runtime ADRs above (ADR-001 to ADR-010) live in `docs/runtime_decisions.md` 
 
 **Status**
 
-Accepted as the **target architecture**. **Nothing in this ADR is implemented.** Section "Current implementation" states what exists today; everything under "Decision" describes a future state.
+Accepted as the **target architecture**. **The PAR flow itself is not implemented** (some supporting components have since been; see "Implementation status" in the accepted-policy annotation below). Section "Current implementation" states what exists today; everything under "Decision" describes a future state.
 
 **Date**
 
@@ -88,11 +88,49 @@ Binding semantics only (no authority, persistence, issuer or verification): `gov
 
 **Related**
 
-ADR-001 (Runtime coordinates, Core reasons), Q8–Q17 below, `codex/philosophy/CONSTITUTION.md` (Protected Constraints), `codex/operations/AUTONOMY_CHARTER.md` (Initiative Rule).
+ADR-001 (Runtime coordinates, Core reasons), Q8–Q25 below, `codex/philosophy/CONSTITUTION.md` (Protected Constraints), `codex/operations/AUTONOMY_CHARTER.md` (Initiative Rule).
 
 **Annotations**
 
-The Codex states that Protected Constraints require "explicit approval" or "appropriate discussion/authorization" and that certain decisions must "remain human-controlled". It does not define who may give that approval, how the human is identified, or through which surface. This ADR deliberately does **not** supply those definitions. They are unresolved policy questions requiring an explicit human decision, and may require a Codex amendment; no Codex change is made or implied here.
+The Codex states that Protected Constraints require "explicit approval" or "appropriate discussion/authorization" and that certain decisions must "remain human-controlled". It does not define who may give that approval, how the human is identified, or through which surface. This ADR deliberately does **not** supply those definitions. They are unresolved policy questions requiring an explicit human decision, and may require a Codex amendment; no Codex change is made or implied here. *(Addressed afterwards by the accepted initial policy recorded in the next subsection; this paragraph is kept as originally written.)*
+
+### GOV-ADR-001 Annotation: Accepted Initial Human Authorization Policy
+
+**Recorded:** 2026-10-28. This section records policy accepted by the project owner. It is **policy and target behaviour, not current implementation**; the Implementation status subsection says what exists. It does not amend the Codex or the PAR decision above; it supplies the definitions the original Annotations left open (Q13–Q17). The "Context" bullet above that says `human_authorized` yields `PERMITTED` describes the repository when the ADR was accepted; it was superseded by the neutralization recorded under "Implementation status".
+
+**Accepted policy**
+
+1. **Operator identity and threat model.**
+   - The initial authorized operator is the Windows account whose process-token SID matches the explicitly configured `authorization.operator_sid`. The pin is never populated automatically.
+   - A SID match establishes an authorized process-account match. It is not proof of which person is at the keyboard.
+   - The initial threat model addresses model-generated authority, injected data, caller-controlled context and accidental approval.
+   - **Malicious software already running as the same Windows user is outside the initial threat model.** This design does not protect against it.
+   - Fresh Windows authentication, Windows Hello, passwords and a separate authentication service are not part of the initial implementation.
+2. **Explicit approval.**
+   - Approval is a deliberate, affirmative human action through a trusted approval surface, bound to the exact action and its effective Protected Constraint impact.
+   - It is never inferred from ordinary chat, silence, keywords, model output, Observation content or caller-controlled context.
+   - The initial trusted surface is a dedicated console approval flow, separate from ordinary chat. The proposed action is displayed clearly and approval requires an unambiguous per-request challenge. Blank, unexpected or ambiguous input is denial.
+3. **P1 Constitution Integrity is not grantable** through the initial approval workflow. Constitutional changes require a separate, deliberate, human-controlled process, which is not defined here.
+4. **P4 Resource Authorization requires a separate review step before approval.** The review displays the proposed action, resource commitments, rationale and consequences. Reviewing is not itself authorization.
+5. **P5 Human Authority over Life-Impacting Decisions.** A system-originated proposal affecting P5 cannot receive a grant through the initial workflow. The human must originate the decision rather than merely approve a system proposal. Origin must eventually be represented structurally, not inferred from text.
+6. **Reversibility.** The initial workflow may grant only for actions explicitly classified as reversible. Unknown or irreversible actions fail closed under this workflow. No magnitude scoring, tiered authentication or change to tool capability declarations is part of this policy.
+7. **Emergency mode.** Emergency status, urgency keywords and caller-controlled emergency flags never authorize an action that affects a Protected Constraint. Emergency handling cannot override constitutional restrictions or manufacture human approval.
+8. **Grant lifecycle.** Grants require exact-action binding (tool identity and version, arguments, effective impact), exact Protected Constraint scope, explicit expiry, single-use consumption and replay prevention.
+
+**Implementation status (at HEAD `6bc92ee`)**
+
+- Implemented: `governance/authorization.py` (immutable `AuthorizationGrant`, canonical action digest, scope coverage, validity window); `governance/grant_ledger.py` (dedicated SQLite ledger, atomic single-use consumption); `governance/grant_verifier.py` (record, digest, scope, validity and consumption checks); `governance/operator.py` (process-token SID compared with the configured pin); `core/constitution.py` no longer treats `ActionRequest.human_authorized` as permission, so no non-empty impact can currently be `PERMITTED`.
+- The operator pin is **unset by default**. Nothing in production calls the operator resolution, the ledger or the verifier.
+- The verifier establishes record, binding, scope, validity and single use only; it does not authenticate an issuer.
+
+**Required future implementation (none of it exists)**
+
+- A constrained grant issuer that recomputes the action binding itself, applies the policy above (excluding P1 and system-originated P5, requiring a recorded P4 review, accepting only explicitly reversible actions) and writes to the ledger.
+- The dedicated console approval flow with a per-request challenge.
+- Integration of verified grant evidence into `Constitution.validate_action()` as the only path to `PERMITTED`.
+- Structural representation of action origin, an `ActionProposal` and an Action Authority.
+
+**Unresolved** — see Q18–Q25 and the retained parts of Q9, Q10, Q12 and Q17 below.
 
 ## Implementation Decisions (Runtime Lifecycle milestone, not formal ADRs)
 
@@ -122,6 +160,9 @@ Facts about the current codebase established by later milestones. They are recor
 | Every Recovery Observation uses `Priority.NORMAL` regardless of termination classification; the classification is preserved in the payload | **Existing** (implemented) | The Runtime does not decide that an unclean shutdown outranks a clean one | `wiring.build_recovery_observation()` |
 | The Event Loop creates no `ActionRequest` and executes no tool; every Observation ends at Stage 6 as `NO_ACTION` | **Existing** (implemented) | Authority questions for autonomous action are unresolved (see Q8–Q12) | `wiring.build_observation_invoker()`, `tests/test_runtime_boundaries.py` |
 | `PipelineTrace.observation` (`ObservationProvenance`: `observation_id`, `observation_type`, `source`) records which Observation drove a pipeline run; runs not driven by an Observation record none | **Existing** (implemented) | Traceability from execution back to the Observation | `core/types.py`, `pipeline.py`, `tests/test_observation_provenance.py` |
+| `ActionRequest.human_authorized` confers no constitutional permission; with Codex authority loaded every non-empty impact is a `VIOLATION` | **Existing** (implemented) | A caller-declared boolean is not authorization evidence (GOV-ADR-001) | `core/constitution.py: validate_action()`, `tests/test_constitutional_validation.py` |
+| Authorization grants are immutable records bound to a canonical SHA-256 action digest, with scope and a half-open validity window; a dedicated SQLite ledger stores them and enforces single consumption; a verifier checks digest, scope, validity and consumption. None is called by production code, and the verifier does not authenticate an issuer | **Existing** (implemented, not integrated) | PAR target architecture | `governance/authorization.py`, `governance/grant_ledger.py`, `governance/grant_verifier.py` |
+| The process account SID is read from the Windows process token and compared with the configured `authorization.operator_sid`; the pin is unset by default and never auto-populated. A match is an account match, not authentication of a person | **Existing** (implemented, not integrated) | Initial operator model (GOV-ADR-001 annotation) | `governance/operator.py`, `config.py` |
 | Synchronous CLI chat does not use the Event Loop | **Existing** (implemented) | Chat answers in-turn; routing it through a queue would change its latency contract | `interaction/cli_chat.py` |
 
 ## Open Questions / Unresolved Issues
@@ -138,12 +179,22 @@ Not established in repository. Do not silently resolve these — surface them if
 | Q6 | Interactive `chat`'s Ctrl+C behavior changed: the Runtime's signal handler intercepts SIGINT before Python's default `KeyboardInterrupt` can, and since the handler never raises, it cannot unblock a synchronous `input()` call the REPL is waiting on. | The memory store still closes correctly (via a `finally` block), but Ctrl+C no longer interrupts an in-progress prompt the way it did before this milestone. Not resolved; documented as a known regression, not fixed, since a proper fix is Event-Loop-shaped work. |
 | Q7 | Whether real OS-delivered Ctrl+C reaches the Runtime's installed handler in the actual deployment environment could not be verified in the environment used to build this milestone (isolated to a console-attachment limitation of that specific harness via a minimal, non-Telemachus repro). | The handler *contract* is fully tested (Event set → graceful shutdown completes); only genuine OS signal delivery is unverified here. |
 | Q8 | Who may create an `ActionRequest`. No production code does today. | Target direction recorded in GOV-ADR-001 (a governed Action Authority builds it from an untrusted proposal plus authorization). Not implemented. |
-| Q9 | Who is authoritative for `ActionRequest.human_authorized`. It is currently set by whoever constructs the request, and `Constitution.validate_action()` returns `PERMITTED` when it is true. | Target direction recorded in GOV-ADR-001 (replace the boolean with verifiable authorization evidence). Not implemented; the issuer questions Q13–Q17 remain open. |
+| Q9 | Who is authoritative for `ActionRequest.human_authorized`. It is set by whoever constructs the request. | Partly resolved. The boolean no longer confers permission (`validate_action()` ignores it). The target (verifiable authorization evidence) is recorded in GOV-ADR-001 and the accepted initial policy; the issuer and integration are not implemented. Whether the field is removed or replaced is not decided. |
 | Q10 | How producer-declared `ActionRequest.affects` and tool-declared `protected_constraints` should ultimately be trusted or verified. Today they are type-checked, not verified against behaviour. | Open. GOV-ADR-001 records that the union is only a capability floor and that autonomous execution needs stronger assurance (including argument-sensitive impact); the mechanism (static, dynamic or other attestation) is undecided. GOV-ADR-001 makes it a prerequisite for any ACTIVE or AUTONOMOUS tool; that tool architecture itself remains open (Q12). |
 | Q11 | Redesign of `AutonomyCharter.check_initiative()`: it has no production caller and decides by free-text substring matching. | Open. GOV-ADR-001 records that the current keyword form is not an acceptable authority mechanism and that initiative stays an autonomy-layer concept; the redesign and its structured inputs are not decided. |
 | Q12 | The autonomy domain for Runtime-originated Observations is undefined (the autonomy stage falls back to `"research"`), and Observations enter the pipeline as user-input-shaped text. Also deferred: autonomous `ActionRequest` generation, the ACTIVE/AUTONOMOUS tool architecture, and the later Event Loop semantic stages (Signal Processor, Aggregation, dynamic priority, dependency/resource scheduling). | Deferred. |
-| Q13 | What exactly constitutes "explicit approval" under the Codex (`CONSTITUTION.md`, Protected Constraints 1 and 4; `AUTONOMY_CHARTER.md`)? | Unresolved policy/Codex question requiring a human decision. GOV-ADR-001 does not define it. |
-| Q14 | Who is an authorized human grantor? | Unresolved; requires a human decision. |
-| Q15 | How is the human issuer identified and authenticated? | Unresolved; requires a human decision. |
-| Q16 | Which approval surface(s) may issue grants (CLI, a future channel, other)? | Unresolved. Observation content and Runtime components are excluded by GOV-ADR-001, but no positive list exists. |
-| Q17 | What persistence guarantees are required for grant replay prevention (single-use and expiry bookkeeping), and where is that state kept? | Unresolved. No design exists; no `runtime.db` or `telemachus.db` change is implied. |
+| Q13 | What constitutes "explicit approval" under the Codex? | **Decided (policy)** — GOV-ADR-001 accepted initial policy, items 2–8: a deliberate, affirmative human action through a trusted approval surface, bound to the exact action and effective impact, never inferred. P1 is not grantable; P4 requires a separate review first; system-originated P5 proposals are not grantable; only explicitly reversible actions may be granted. The Codex is not amended. Details left open: Q18–Q23. |
+| Q14 | Who is an authorized human grantor? | **Decided (initial)** — the Windows account whose process-token SID matches the configured `authorization.operator_sid`. Core, Runtime, the Event Loop, Observations, model output, tools and ActionRequest producers can never grant. Whether additional operators are ever allowed is not addressed. |
+| Q15 | How is the human issuer identified and authenticated? | **Decided (initial), limited** — identified by the process-token SID (`governance/operator.py`, implemented; pin unset by default). This is account identity, not authentication of a person. Stronger authentication: Q24. |
+| Q16 | Which approval surface(s) may issue grants? | **Decided (initial)** — a dedicated console approval flow, separate from ordinary chat. Not implemented. Any other surface needs a new architecture decision. |
+| Q17 | What persistence guarantees are required for grant replay prevention? | **Invariants decided** — unique grant identity, durable storage, exact-action binding, exact Protected Constraint scope, explicit expiry, single use, replay prevention, and modified arguments never reusing a grant. The ledger (`governance/grant_ledger.py`) implements storage and atomic single consumption. Still open: expiry duration (Q21), revocation (Q22), pending-proposal persistence (Q25). |
+| Q18 | The precise mechanism for establishing that a P5 decision originated with the human, and for preserving human-originated intent structurally rather than by text. | Open. Policy requires human origin; the mechanism is future work. |
+| Q19 | The process for constitutional changes outside the grant workflow (P1 is not grantable). | Open. Not defined or implemented. |
+| Q20 | The exact implementation of the P4 review step, and whether additional discussion records are required or persisted. | Open. Policy requires a separate review before approval, showing the action, resource commitments, rationale and consequences; no further protocol is decided. |
+| Q21 | Default grant expiry duration. | Open. Policy requires explicit expiry; no duration is chosen. |
+| Q22 | Whether and how grants may be revoked before consumption. | Open. Not part of the initial policy. |
+| Q23 | How an action is "explicitly classified as reversible": who or what supplies the classification (for example the existing `Tool.reversible` flag, an argument-dependent classification, or another source), and how unknown is represented. | Open. Policy requires fail-closed on unknown or irreversible; the source is not decided and tool capability declarations are not changed by this policy. |
+| Q24 | Whether stronger authentication (fresh Windows authentication or similar) should later be required for high-impact actions, and any tiering by magnitude. | Open. Excluded from the initial implementation. |
+| Q25 | Pending-proposal persistence and other requirements introduced by asynchronous approval. | Open. No design exists. |
+
+Same-user malicious software: the initial design gives **no** guarantee against software already executing as the authorized Windows user. That limit is accepted for the initial threat model, not solved.
